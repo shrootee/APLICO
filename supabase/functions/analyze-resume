@@ -1,0 +1,52 @@
+// src/pages/resumes/ATSChecker.jsx
+
+// 1. PEHLE: Lib import check karo
+import { supabase } from '../../lib/Supabse';  // ✅ Correct path
+
+// 2. PHIR: analyzeResumeWithAI function replace karo
+const analyzeResumeWithAI = async (resumeText, resumeName, targetRole) => {
+  try {
+    const response = await fetch(
+      `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyze-resume`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({
+          resumeText: resumeText.substring(0, 10000),
+          resumeName,
+          targetRole: targetRole || 'Software Engineer',
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('API error:', errorText);
+      throw new Error(`API error: ${response.status}`);
+    }
+
+    const result = await response.json();
+    
+    // Validate and normalize score
+    const score = Math.round(Math.max(0, Math.min(100, result.atsScore || 50)));
+    result.atsScore = score;
+    
+    result.summary = result.summary || 'Analysis completed.';
+    result.overallRating = result.overallRating || 'Average';
+    result.strengths = Array.isArray(result.strengths) ? result.strengths : [];
+    result.improvements = Array.isArray(result.improvements) ? result.improvements : [];
+    result.keywords = Array.isArray(result.keywords) ? result.keywords : [];
+    result.missingKeywords = Array.isArray(result.missingKeywords) ? result.missingKeywords : [];
+    result.formattingIssues = Array.isArray(result.formattingIssues) ? result.formattingIssues : [];
+    result.detailedAnalysis = result.detailedAnalysis || '';
+
+    return result;
+
+  } catch (error) {
+    console.error('AI Analysis Error:', error);
+    throw error;
+  }
+};
