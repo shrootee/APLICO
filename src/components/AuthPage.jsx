@@ -3,9 +3,9 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/Supabase.js';
 import { Input, Form, message } from 'antd';
-import { 
-  MailOutlined, 
-  LockOutlined, 
+import {
+  MailOutlined,
+  LockOutlined,
   UserOutlined,
   GoogleOutlined,
   GithubOutlined,
@@ -48,6 +48,24 @@ const AuthPage = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // Handle OAuth error parameters returned in URL
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const hash = location.hash.startsWith('#') ? location.hash.substring(1) : location.hash;
+    const hashParams = new URLSearchParams(hash);
+
+    const errorDesc =
+      params.get('error_description') ||
+      params.get('error') ||
+      hashParams.get('error_description') ||
+      hashParams.get('error');
+
+    if (errorDesc) {
+      console.error('OAuth callback error:', errorDesc);
+      message.error(decodeURIComponent(errorDesc.replace(/\+/g, ' ')));
+    }
+  }, [location.search, location.hash]);
+
   // Handle session check and OAuth callback processing
   useEffect(() => {
     const handleAuthRedirect = async () => {
@@ -69,7 +87,7 @@ const AuthPage = () => {
         if (!profile) {
           // New User (e.g. via Google OAuth or fresh signup)
           const userFullName = user.user_metadata?.full_name || user.user_metadata?.name || '';
-          
+
           await supabase
             .from('profile')
             .upsert([
@@ -105,6 +123,7 @@ const AuthPage = () => {
   const handleGoogleLogin = async () => {
     try {
       setLoading(true);
+
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
@@ -112,13 +131,18 @@ const AuthPage = () => {
         }
       });
 
-      if (error) throw error;
-    } catch (err) {
-      console.error('Google Login Error:', err);
-      message.error(err.message || 'Failed to login with Google');
+      if (error) {
+        console.error('Google login error:', error.message);
+        message.error(error.message || 'Failed to initialize Google login');
+      }
+    } catch (error) {
+      console.error('Unexpected login error:', error);
+      message.error(error?.message || 'Unexpected error during Google login');
+    } finally {
       setLoading(false);
     }
   };
+
 
   // Email Signup Handler - NEW USER
   const handleSignup = async (values) => {
@@ -187,6 +211,36 @@ const AuthPage = () => {
     }
   };
 
+  // If user is already authenticated or callback redirect is processing, show loading state
+  if ((session && user) || (loading && callbackProcessed.current)) {
+    return (
+      <div style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: colors.background,
+        color: colors.textPrimary,
+        fontFamily: typography.fontFamilySystem,
+        gap: '16px'
+      }}>
+        <div style={{
+          width: '36px',
+          height: '36px',
+          border: `3px solid ${colors.cardBorder}`,
+          borderTopColor: colors.primary,
+          borderRadius: '50%',
+          animation: 'spin 0.8s linear infinite'
+        }} />
+        <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+        <span style={{ fontSize: '14px', color: colors.textSecondary }}>
+          Completing sign-in...
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div style={{
       minHeight: '100vh',
@@ -196,7 +250,7 @@ const AuthPage = () => {
       color: colors.textPrimary,
       fontFamily: typography.fontFamilySystem
     }}>
-      
+
       {/* LEFT SIDE - BRAND PROMO */}
       {!isMobile && (
         <div style={{
@@ -251,7 +305,7 @@ const AuthPage = () => {
                 dream opportunity
               </span>
             </h1>
-            
+
             <p style={{
               fontSize: '16px',
               color: colors.textSecondary,
@@ -284,7 +338,7 @@ const AuthPage = () => {
         background: colors.background
       }}>
         <div style={{ maxWidth: '380px', width: '100%' }}>
-          
+
           {/* Mobile Back Link */}
           {isMobile && (
             <button
@@ -413,6 +467,7 @@ const AuthPage = () => {
                 type="button"
                 onClick={handleGoogleLogin}
                 icon={<GoogleOutlined />}
+                disabled={loading || authLoading}
                 style={{
                   flex: 1,
                   height: '42px',
