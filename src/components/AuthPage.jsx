@@ -19,8 +19,16 @@ import PrimaryButton from './ui/PrimaryButton';
 import SecondaryButton from './ui/SecondaryButton';
 import Card from './ui/Card';
 
-// Helper to determine the application redirect URL
-const getAppRedirectUrl = () => {
+// Dedicated Email Verification redirect URL (Targets dedicated /verify-email route)
+const getEmailVerifyRedirectUrl = () => {
+  if (typeof window !== 'undefined' && window.location.origin) {
+    return `${window.location.origin}/verify-email`;
+  }
+  return 'https://aplico-black.vercel.app/verify-email';
+};
+
+// OAuth redirect URL (Preserved for Google and GitHub OAuth)
+const getOAuthRedirectUrl = () => {
   if (typeof window !== 'undefined' && window.location.origin) {
     return `${window.location.origin}/auth`;
   }
@@ -108,33 +116,43 @@ const AuthPage = () => {
       hashParams.get('error');
     const errorCode = params.get('error_code') || hashParams.get('error_code');
     const type = params.get('type') || hashParams.get('type');
-    const messageParam = params.get('message') || hashParams.get('message');
+
+    // Requirement 5: Do not redirect confirmation link to existing login form or dashboard
+    // If this is an email confirmation callback or related error, immediately forward to dedicated /verify-email route
+    if (
+      type === 'signup' ||
+      type === 'email_confirmation' ||
+      type === 'email_change' ||
+      hashParams.get('type') === 'signup' ||
+      (errorDesc && (errorCode === 'otp_expired' || errorCode === 'bad_code' || type === 'signup'))
+    ) {
+      navigate(`/verify-email${location.search ? location.search : ''}${location.hash ? location.hash : ''}`, { replace: true });
+      return;
+    }
 
     if (errorDesc) {
       console.error('Auth callback error:', errorDesc);
       const decoded = decodeURIComponent(errorDesc.replace(/\+/g, ' '));
-      if (decoded.toLowerCase().includes('expired') || errorCode === 'otp_expired') {
-        message.error('This verification link has expired. Please request a new confirmation email below.', 6);
-      } else if (decoded.toLowerCase().includes('invalid') || errorCode === 'bad_code') {
-        message.error('This verification link is invalid. Please request a new confirmation email.', 6);
-      } else {
-        message.error(decoded);
-      }
-      return;
+      message.error(decoded);
     }
+  }, [location.search, location.hash, navigate]);
 
-    // Check if this was an email verification callback without an active session
-    if ((type === 'signup' || type === 'email_confirmation' || messageParam?.toLowerCase().includes('verified')) && !session && !authLoading) {
-      message.success('Email verified! Please sign in to continue.', 6);
-      setIsLogin(true);
-      setSignupSuccessEmail('');
-    }
-  }, [location.search, location.hash, session, authLoading]);
-
-  // Handle session check and OAuth/email callback processing
+  // Handle session check and OAuth callback processing
   useEffect(() => {
     const handleAuthRedirect = async () => {
       if (authLoading || !session || !user || callbackProcessed.current) {
+        return;
+      }
+
+      const params = new URLSearchParams(location.search);
+      const hash = location.hash.startsWith('#') ? location.hash.substring(1) : location.hash;
+      const hashParams = new URLSearchParams(hash);
+      const type = params.get('type') || hashParams.get('type');
+      const isVerificationCallback = type === 'signup' || type === 'email_confirmation' || type === 'email_change';
+
+      // Requirement 4 & 5: If email verification callback, forward to /verify-email without auto-logging in or redirecting to dashboard
+      if (isVerificationCallback) {
+        navigate(`/verify-email${location.search ? location.search : ''}${location.hash ? location.hash : ''}`, { replace: true });
         return;
       }
 
@@ -156,12 +174,6 @@ const AuthPage = () => {
 
       callbackProcessed.current = true;
       setLoading(true);
-
-      const params = new URLSearchParams(location.search);
-      const hash = location.hash.startsWith('#') ? location.hash.substring(1) : location.hash;
-      const hashParams = new URLSearchParams(hash);
-      const type = params.get('type') || hashParams.get('type');
-      const isVerificationCallback = type === 'signup' || type === 'email_confirmation';
 
       try {
         // Check if user has a profile record
@@ -234,7 +246,7 @@ const AuthPage = () => {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: getAppRedirectUrl()
+          redirectTo: getOAuthRedirectUrl()
         }
       });
 
@@ -258,7 +270,7 @@ const AuthPage = () => {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'github',
         options: {
-          redirectTo: getAppRedirectUrl()
+          redirectTo: getOAuthRedirectUrl()
         }
       });
 
@@ -289,7 +301,7 @@ const AuthPage = () => {
         type: 'signup',
         email: targetEmail.trim().toLowerCase(),
         options: {
-          emailRedirectTo: getAppRedirectUrl()
+          emailRedirectTo: getEmailVerifyRedirectUrl()
         }
       });
       if (error) {
@@ -322,7 +334,7 @@ const AuthPage = () => {
     try {
       setLoading(true);
       const { error } = await supabase.auth.resetPasswordForEmail(targetEmail.trim().toLowerCase(), {
-        redirectTo: `${getAppRedirectUrl()}?mode=reset`
+        redirectTo: `${getOAuthRedirectUrl()}?mode=reset`
       });
       if (error) {
         if (error.status >= 500 || error.name === 'AuthRetryableFetchError' || error.message === '{}') {
@@ -354,7 +366,7 @@ const AuthPage = () => {
             full_name: cleanName,
             name: cleanName,
           },
-          emailRedirectTo: getAppRedirectUrl(),
+          emailRedirectTo: getEmailVerifyRedirectUrl(),
         }
       });
 

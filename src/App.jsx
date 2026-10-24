@@ -5,6 +5,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 import LandingPage from './components/LandingPage';
 import MainDashboard from './pages/resumes/MainDashboard';
 import Auth from './components/AuthPage';
+import VerifyEmail from './components/VerifyEmail';
 import Signup from './components/Signup';
 import MyResumes from './pages/resumes/MyResumes';       
 import ResumeBuilder from './pages/resumes/ResumeBuilder'; 
@@ -23,6 +24,8 @@ function App() {
           {/* Public Routes */}
           <Route path="/" element={<LandingPage />} />
           <Route path="/auth" element={<Auth />} />
+          <Route path="/verify-email" element={<VerifyEmail />} />
+          <Route path="/auth/verify" element={<VerifyEmail />} />
 
           {/* Protected Onboarding Route */}
           <Route
