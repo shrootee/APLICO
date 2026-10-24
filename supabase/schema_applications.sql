@@ -68,32 +68,48 @@ GRANT USAGE ON SCHEMA public TO anon, authenticated;
 GRANT ALL ON TABLE public.applications TO anon, authenticated;
 GRANT ALL ON TABLE public.application_requirements TO anon, authenticated;
 
--- 6. Enable Row Level Security (RLS)
+-- 6. Helper function for Email Verification
+CREATE OR REPLACE FUNCTION public.is_email_verified()
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM auth.users
+    WHERE id = auth.uid()
+      AND email_confirmed_at IS NOT NULL
+  );
+$$;
+
+GRANT EXECUTE ON FUNCTION public.is_email_verified() TO anon, authenticated;
+
+-- 7. Enable Row Level Security (RLS)
 ALTER TABLE public.applications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.application_requirements ENABLE ROW LEVEL SECURITY;
 
--- 7. RLS Policies for Applications Table
+-- 8. RLS Policies for Applications Table (Enforces email verification)
 DROP POLICY IF EXISTS "Users can view their own applications" ON public.applications;
 CREATE POLICY "Users can view their own applications"
     ON public.applications FOR SELECT
-    USING (auth.uid() = user_id);
+    USING (auth.uid() = user_id AND public.is_email_verified());
 
 DROP POLICY IF EXISTS "Users can insert their own applications" ON public.applications;
 CREATE POLICY "Users can insert their own applications"
     ON public.applications FOR INSERT
-    WITH CHECK (auth.uid() = user_id);
+    WITH CHECK (auth.uid() = user_id AND public.is_email_verified());
 
 DROP POLICY IF EXISTS "Users can update their own applications" ON public.applications;
 CREATE POLICY "Users can update their own applications"
     ON public.applications FOR UPDATE
-    USING (auth.uid() = user_id);
+    USING (auth.uid() = user_id AND public.is_email_verified());
 
 DROP POLICY IF EXISTS "Users can delete their own applications" ON public.applications;
 CREATE POLICY "Users can delete their own applications"
     ON public.applications FOR DELETE
-    USING (auth.uid() = user_id);
+    USING (auth.uid() = user_id AND public.is_email_verified());
 
--- 8. RLS Policies for Application Requirements Table
+-- 9. RLS Policies for Application Requirements Table
 DROP POLICY IF EXISTS "Users can view their application requirements" ON public.application_requirements;
 CREATE POLICY "Users can view their application requirements"
     ON public.application_requirements FOR SELECT
@@ -102,6 +118,7 @@ CREATE POLICY "Users can view their application requirements"
             SELECT 1 FROM public.applications
             WHERE applications.id = application_requirements.application_id
             AND applications.user_id = auth.uid()
+            AND public.is_email_verified()
         )
     );
 
@@ -113,6 +130,7 @@ CREATE POLICY "Users can insert their application requirements"
             SELECT 1 FROM public.applications
             WHERE applications.id = application_requirements.application_id
             AND applications.user_id = auth.uid()
+            AND public.is_email_verified()
         )
     );
 
@@ -124,6 +142,7 @@ CREATE POLICY "Users can update their application requirements"
             SELECT 1 FROM public.applications
             WHERE applications.id = application_requirements.application_id
             AND applications.user_id = auth.uid()
+            AND public.is_email_verified()
         )
     );
 
@@ -135,6 +154,7 @@ CREATE POLICY "Users can delete their application requirements"
             SELECT 1 FROM public.applications
             WHERE applications.id = application_requirements.application_id
             AND applications.user_id = auth.uid()
+            AND public.is_email_verified()
         )
     );
 
@@ -146,9 +166,9 @@ ON CONFLICT (id) DO NOTHING;
 DROP POLICY IF EXISTS "Users can upload application resumes" ON storage.objects;
 CREATE POLICY "Users can upload application resumes"
     ON storage.objects FOR INSERT
-    WITH CHECK (bucket_id = 'application_resumes' AND auth.uid() = owner);
+    WITH CHECK (bucket_id = 'application_resumes' AND auth.uid() = owner AND public.is_email_verified());
 
 DROP POLICY IF EXISTS "Users can view own application resumes" ON storage.objects;
 CREATE POLICY "Users can view own application resumes"
     ON storage.objects FOR SELECT
-    USING (bucket_id = 'application_resumes' AND auth.uid() = owner);
+    USING (bucket_id = 'application_resumes' AND auth.uid() = owner AND public.is_email_verified());

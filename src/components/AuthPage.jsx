@@ -10,13 +10,22 @@ import {
   GoogleOutlined,
   GithubOutlined,
   ArrowLeftOutlined,
-  ReloadOutlined
+  ReloadOutlined,
+  CheckCircleOutlined
 } from '@ant-design/icons';
 import { colors, typography } from '../theme/tokens';
 import BrandLogo from './ui/BrandLogo';
 import PrimaryButton from './ui/PrimaryButton';
 import SecondaryButton from './ui/SecondaryButton';
 import Card from './ui/Card';
+
+// Helper to determine the application redirect URL
+const getAppRedirectUrl = () => {
+  if (typeof window !== 'undefined' && window.location.origin) {
+    return `${window.location.origin}/auth`;
+  }
+  return 'https://aplico-black.vercel.app/auth';
+};
 
 // Helper to format Supabase auth errors (prevents literal '{}' and handles 500 SMTP errors)
 const parseAuthError = (error, fallback = 'An unexpected error occurred') => {
@@ -35,17 +44,32 @@ const AuthPage = () => {
   const location = useLocation();
   const { user, session, loading: authLoading } = useAuth();
 
-  // Read URL search params for mode=signup or mode=login
+  // Read URL search params for mode=signup, mode=login, or verify=pending
   const searchParams = new URLSearchParams(location.search);
   const initialMode = searchParams.get('mode');
+  const verifyParam = searchParams.get('verify');
+  const stateEmail = location.state?.unverifiedEmail;
 
   const [form] = Form.useForm();
   const [isLogin, setIsLogin] = useState(initialMode !== 'signup');
   const [loading, setLoading] = useState(false);
-  const [resendEmail, setResendEmail] = useState('');
+  const [resendEmail, setResendEmail] = useState(stateEmail || '');
+  const [signupSuccessEmail, setSignupSuccessEmail] = useState(
+    verifyParam === 'pending' && stateEmail ? stateEmail : ''
+  );
   const [resending, setResending] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
   const callbackProcessed = useRef(false);
+
+  // Cooldown timer for resending confirmation email
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResendCooldown((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldown]);
 
   useEffect(() => {
     if (initialMode === 'signup') {
@@ -56,6 +80,13 @@ const AuthPage = () => {
   }, [initialMode]);
 
   useEffect(() => {
+    if (verifyParam === 'pending' && stateEmail) {
+      setSignupSuccessEmail(stateEmail);
+      setResendEmail(stateEmail);
+    }
+  }, [verifyParam, stateEmail]);
+
+  useEffect(() => {
     const handleResize = () => {
       setIsMobile(window.innerWidth <= 768);
     };
@@ -64,7 +95,7 @@ const AuthPage = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Handle OAuth error parameters returned in URL
+  // Handle OAuth & Email Verification parameters returned in URL
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const hash = location.hash.startsWith('#') ? location.hash.substring(1) : location.hash;
@@ -75,22 +106,62 @@ const AuthPage = () => {
       params.get('error') ||
       hashParams.get('error_description') ||
       hashParams.get('error');
+    const errorCode = params.get('error_code') || hashParams.get('error_code');
+    const type = params.get('type') || hashParams.get('type');
+    const messageParam = params.get('message') || hashParams.get('message');
 
     if (errorDesc) {
-      console.error('OAuth callback error:', errorDesc);
-      message.error(decodeURIComponent(errorDesc.replace(/\+/g, ' ')));
+      console.error('Auth callback error:', errorDesc);
+      const decoded = decodeURIComponent(errorDesc.replace(/\+/g, ' '));
+      if (decoded.toLowerCase().includes('expired') || errorCode === 'otp_expired') {
+        message.error('This verification link has expired. Please request a new confirmation email below.', 6);
+      } else if (decoded.toLowerCase().includes('invalid') || errorCode === 'bad_code') {
+        message.error('This verification link is invalid. Please request a new confirmation email.', 6);
+      } else {
+        message.error(decoded);
+      }
+      return;
     }
-  }, [location.search, location.hash]);
 
-  // Handle session check and OAuth callback processing
+    // Check if this was an email verification callback without an active session
+    if ((type === 'signup' || type === 'email_confirmation' || messageParam?.toLowerCase().includes('verified')) && !session && !authLoading) {
+      message.success('Email verified! Please sign in to continue.', 6);
+      setIsLogin(true);
+      setSignupSuccessEmail('');
+    }
+  }, [location.search, location.hash, session, authLoading]);
+
+  // Handle session check and OAuth/email callback processing
   useEffect(() => {
     const handleAuthRedirect = async () => {
       if (authLoading || !session || !user || callbackProcessed.current) {
         return;
       }
 
+      // Check if user is verified
+      const verified = Boolean(
+        user.email_confirmed_at ||
+        user.confirmed_at ||
+        user.user_metadata?.email_verified ||
+        user.app_metadata?.provider === 'google' ||
+        user.app_metadata?.provider === 'github'
+      );
+
+      if (!verified) {
+        // Stop unverified user from accessing dashboard; show verification screen
+        setSignupSuccessEmail(user.email || '');
+        setResendEmail(user.email || '');
+        return;
+      }
+
       callbackProcessed.current = true;
       setLoading(true);
+
+      const params = new URLSearchParams(location.search);
+      const hash = location.hash.startsWith('#') ? location.hash.substring(1) : location.hash;
+      const hashParams = new URLSearchParams(hash);
+      const type = params.get('type') || hashParams.get('type');
+      const isVerificationCallback = type === 'signup' || type === 'email_confirmation';
 
       try {
         // Check if user has a profile record
@@ -104,8 +175,12 @@ const AuthPage = () => {
           console.error('Error fetching profile:', profileSelectError);
         }
 
+        if (isVerificationCallback) {
+          message.success('Email verified successfully! Welcome to Aplico.');
+        }
+
         if (!profile) {
-          // New User (e.g. via Google OAuth, GitHub OAuth, or direct email signup)
+          // New User
           const userName =
             user.user_metadata?.full_name ||
             user.user_metadata?.name ||
@@ -128,7 +203,9 @@ const AuthPage = () => {
             console.error('Error creating profile on auth redirect:', insertError);
           }
 
-          message.success('Account ready! Please complete your onboarding questionnaire.');
+          if (!isVerificationCallback) {
+            message.success('Account ready! Please complete your onboarding questionnaire.');
+          }
           navigate('/signup', { replace: true });
         } else if (!profile.goal) {
           // Incomplete profile questionnaire
@@ -157,7 +234,7 @@ const AuthPage = () => {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: `${window.location.origin}/auth`
+          redirectTo: getAppRedirectUrl()
         }
       });
 
@@ -181,7 +258,7 @@ const AuthPage = () => {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'github',
         options: {
-          redirectTo: `${window.location.origin}/auth`
+          redirectTo: getAppRedirectUrl()
         }
       });
 
@@ -198,8 +275,10 @@ const AuthPage = () => {
   };
 
   // Resend verification email
-  const handleResendVerification = async () => {
-    const targetEmail = resendEmail || form.getFieldValue('email');
+  const handleResendVerification = async (targetEmailParam) => {
+    if (resendCooldown > 0) return;
+
+    const targetEmail = targetEmailParam || signupSuccessEmail || resendEmail || form.getFieldValue('email');
     if (!targetEmail) {
       message.warning('Please enter your email address first.');
       return;
@@ -210,11 +289,20 @@ const AuthPage = () => {
         type: 'signup',
         email: targetEmail.trim().toLowerCase(),
         options: {
-          emailRedirectTo: `${window.location.origin}/auth`
+          emailRedirectTo: getAppRedirectUrl()
         }
       });
-      if (error) throw error;
-      message.success('Verification email sent! Please check your inbox and spam folder.');
+      if (error) {
+        if (error.status >= 500 || error.name === 'AuthRetryableFetchError' || error.message === '{}') {
+          throw new Error('Server error (500): Unable to send verification email. Please check your Supabase SMTP settings.');
+        }
+        if (error.message?.includes('rate limit') || error.code === 'over_email_send_rate_limit') {
+          throw new Error('Rate limit reached. Please wait a minute before requesting another confirmation email.');
+        }
+        throw error;
+      }
+      message.success('Confirmation email sent! Please check your inbox and spam folder.');
+      setResendCooldown(60);
     } catch (err) {
       console.error('Resend error:', err);
       message.error(parseAuthError(err, 'Failed to resend verification email'));
@@ -234,7 +322,7 @@ const AuthPage = () => {
     try {
       setLoading(true);
       const { error } = await supabase.auth.resetPasswordForEmail(targetEmail.trim().toLowerCase(), {
-        redirectTo: `${window.location.origin}/auth?mode=reset`
+        redirectTo: `${getAppRedirectUrl()}?mode=reset`
       });
       if (error) {
         if (error.status >= 500 || error.name === 'AuthRetryableFetchError' || error.message === '{}') {
@@ -266,7 +354,7 @@ const AuthPage = () => {
             full_name: cleanName,
             name: cleanName,
           },
-          emailRedirectTo: `${window.location.origin}/auth`,
+          emailRedirectTo: getAppRedirectUrl(),
         }
       });
 
@@ -295,14 +383,13 @@ const AuthPage = () => {
       }
 
       if (data?.session) {
-        // Immediate session created (email confirmation disabled in Supabase)
+        // Immediate session created (if email confirmation is disabled in Supabase)
         message.success('Account created! Welcome to Aplico.');
       } else if (data?.user) {
-        // Supabase email confirmation is enabled
+        // Requirement 2: Replace form with dedicated "Check your email" screen showing destination email
+        setSignupSuccessEmail(cleanEmail);
         setResendEmail(cleanEmail);
-        message.success('Account registered! Please check your email inbox to verify your account before logging in.', 6);
-        setIsLogin(true);
-        form.setFieldsValue({ email: cleanEmail, password: '', confirmPassword: '' });
+        setResendCooldown(60);
       }
     } catch (error) {
       console.error('Signup error:', error);
@@ -330,8 +417,10 @@ const AuthPage = () => {
           throw new Error('Invalid email or password. Please check your credentials.');
         }
         if (error.message?.includes('Email not confirmed') || error.code === 'email_not_confirmed') {
+          setSignupSuccessEmail(cleanEmail);
           setResendEmail(cleanEmail);
-          throw new Error('Email not verified. Please check your inbox or click "Resend verification" below.');
+          message.warning('Please confirm your email address before logging in.', 6);
+          return;
         }
         throw error;
       }
@@ -495,240 +584,342 @@ const AuthPage = () => {
             </button>
           )}
 
-          {/* Form Header */}
-          <div style={{ textAlign: 'left', marginBottom: '32px' }}>
-            <h2 style={{ fontSize: '26px', fontWeight: typography.weights.semibold, color: colors.textPrimary, marginBottom: '8px', letterSpacing: '-0.5px' }}>
-              {isLogin ? 'Welcome back' : 'Get started'}
-            </h2>
-            <p style={{ color: colors.textSecondary, fontSize: '14px', margin: 0, fontWeight: 400 }}>
-              {isLogin ? 'Sign in to continue to Aplico' : 'Create your free account'}
-            </p>
-          </div>
-
-          {/* Form */}
-          <Form form={form} onFinish={isLogin ? handleLogin : handleSignup} layout="vertical">
-            {resendEmail && isLogin && (
-              <div style={{ marginBottom: '16px' }}>
-                <Alert
-                  type="info"
-                  showIcon
-                  message="Email Verification"
-                  description={
-                    <div style={{ marginTop: '4px' }}>
-                      <span>Didn't receive a confirmation link? </span>
-                      <button
-                        type="button"
-                        onClick={handleResendVerification}
-                        disabled={resending}
-                        style={{
-                          background: 'none',
-                          border: 'none',
-                          color: colors.primary,
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                          padding: 0,
-                          textDecoration: 'underline'
-                        }}
-                      >
-                        {resending ? 'Sending...' : 'Resend verification email'}
-                      </button>
-                    </div>
-                  }
-                />
-              </div>
-            )}
-
-            {!isLogin && (
-              <Form.Item
-                name="name"
-                rules={[
-                  { required: true, message: 'Full name is required' },
-                  { whitespace: true, message: 'Full name cannot be empty' }
-                ]}
-                style={{ marginBottom: '16px' }}
-              >
-                <Input
-                  prefix={<UserOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
-                  placeholder="Full name"
-                  size="large"
-                  style={{
-                    background: colors.background,
-                    border: `1px solid ${colors.borderNeutral}`,
-                    borderRadius: '10px',
-                    color: colors.textPrimary,
-                    height: '46px'
-                  }}
-                />
-              </Form.Item>
-            )}
-
-            <Form.Item
-              name="email"
-              rules={[
-                { required: true, message: 'Email address is required' },
-                { type: 'email', message: 'Please enter a valid email address' }
-              ]}
-              style={{ marginBottom: '16px' }}
-            >
-              <Input
-                prefix={<MailOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
-                placeholder="Email address"
-                size="large"
-                style={{
-                  background: colors.background,
-                  border: `1px solid ${colors.borderNeutral}`,
-                  borderRadius: '10px',
-                  color: colors.textPrimary,
-                  height: '46px'
-                }}
-              />
-            </Form.Item>
-
-            <Form.Item
-              name="password"
-              rules={[
-                { required: true, message: 'Password is required' },
-                { min: 6, message: 'Password must be at least 6 characters' }
-              ]}
-              style={{ marginBottom: isLogin ? '10px' : '16px' }}
-            >
-              <Input.Password
-                prefix={<LockOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
-                placeholder="Password"
-                size="large"
-                style={{
-                  background: colors.background,
-                  border: `1px solid ${colors.borderNeutral}`,
-                  borderRadius: '10px',
-                  color: colors.textPrimary,
-                  height: '46px'
-                }}
-              />
-            </Form.Item>
-
-            {!isLogin && (
-              <Form.Item
-                name="confirmPassword"
-                dependencies={['password']}
-                rules={[
-                  { required: true, message: 'Please confirm your password' },
-                  ({ getFieldValue }) => ({
-                    validator(_, value) {
-                      if (!value || getFieldValue('password') === value) {
-                        return Promise.resolve();
-                      }
-                      return Promise.reject(new Error('The passwords do not match'));
-                    },
-                  }),
-                ]}
-                style={{ marginBottom: '24px' }}
-              >
-                <Input.Password
-                  prefix={<LockOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
-                  placeholder="Confirm password"
-                  size="large"
-                  style={{
-                    background: colors.background,
-                    border: `1px solid ${colors.borderNeutral}`,
-                    borderRadius: '10px',
-                    color: colors.textPrimary,
-                    height: '46px'
-                  }}
-                />
-              </Form.Item>
-            )}
-
-            {isLogin && (
-              <div style={{ textAlign: 'right', marginBottom: '24px' }}>
-                <a
-                  href="#forgot"
-                  onClick={handleForgotPassword}
-                  style={{ color: colors.primary, fontSize: '13px', fontWeight: 500 }}
-                >
-                  Forgot password?
-                </a>
-              </div>
-            )}
-
-            <PrimaryButton
-              type="submit"
-              disabled={loading || authLoading}
-              style={{
-                width: '100%',
-                height: '46px',
-                fontSize: '15px'
-              }}
-            >
-              {loading || authLoading ? 'Processing...' : isLogin ? 'Log In' : 'Create Account'}
-            </PrimaryButton>
-
-            {/* Divider */}
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '12px',
-              margin: '24px 0'
-            }}>
-              <div style={{ flex: 1, height: '1px', background: colors.cardBorder }} />
-              <span style={{ color: colors.textMuted, fontSize: '12px', fontWeight: 500 }}>OR</span>
-              <div style={{ flex: 1, height: '1px', background: colors.cardBorder }} />
-            </div>
-
-            {/* Social OAuth Buttons */}
-            <div style={{ display: 'flex', gap: '12px', marginBottom: '28px' }}>
-              <SecondaryButton
-                type="button"
-                onClick={handleGoogleLogin}
-                icon={<GoogleOutlined />}
-                disabled={loading || authLoading}
-                style={{
-                  flex: 1,
-                  height: '42px',
-                  fontSize: '13px'
-                }}
-              >
-                Google
-              </SecondaryButton>
-
-              <SecondaryButton
-                type="button"
-                onClick={handleGithubLogin}
-                icon={<GithubOutlined />}
-                disabled={loading || authLoading}
-                style={{
-                  flex: 1,
-                  height: '42px',
-                  fontSize: '13px'
-                }}
-              >
-                GitHub
-              </SecondaryButton>
-            </div>
-
-            {/* Switch between Login and Signup */}
+          {signupSuccessEmail ? (
+            /* DEDICATED "CHECK YOUR EMAIL" SCREEN */
             <div style={{ textAlign: 'center' }}>
-              <span style={{ color: colors.textSecondary, fontSize: '14px', fontWeight: 400 }}>
-                {isLogin ? "No account? " : "Already have an account? "}
-                <button
+              <div style={{
+                width: '72px',
+                height: '72px',
+                borderRadius: '20px',
+                background: 'rgba(99, 102, 241, 0.12)',
+                border: `1.5px solid rgba(99, 102, 241, 0.28)`,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 24px auto',
+                color: colors.primary,
+                fontSize: '32px',
+                boxShadow: '0 8px 24px rgba(99, 102, 241, 0.15)'
+              }}>
+                <MailOutlined />
+              </div>
+
+              <h2 style={{
+                fontSize: '26px',
+                fontWeight: typography.weights.bold,
+                color: colors.textPrimary,
+                marginBottom: '10px',
+                letterSpacing: '-0.5px'
+              }}>
+                Check your email
+              </h2>
+
+              <p style={{
+                color: colors.textSecondary,
+                fontSize: '14px',
+                margin: '0 0 20px 0',
+                lineHeight: '1.5'
+              }}>
+                We’ve sent a confirmation link to:
+              </p>
+
+              <div style={{
+                background: 'rgba(255, 255, 255, 0.04)',
+                border: `1px solid ${colors.cardBorder}`,
+                borderRadius: '12px',
+                padding: '14px 18px',
+                marginBottom: '20px',
+                wordBreak: 'break-all',
+                fontSize: '15px',
+                fontWeight: typography.weights.semibold,
+                color: colors.textPrimary,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px'
+              }}>
+                <MailOutlined style={{ color: colors.primary }} />
+                <span>{signupSuccessEmail}</span>
+              </div>
+
+              <p style={{
+                color: colors.textMuted,
+                fontSize: '13px',
+                lineHeight: '1.6',
+                marginBottom: '28px'
+              }}>
+                Click the link inside the email to verify your account and activate access to your dashboard. If you don't see it within a minute, check your spam or junk folder.
+              </p>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <PrimaryButton
+                  type="button"
+                  onClick={() => handleResendVerification(signupSuccessEmail)}
+                  disabled={resending || resendCooldown > 0}
+                  style={{
+                    width: '100%',
+                    height: '46px',
+                    fontSize: '14px'
+                  }}
+                >
+                  {resending ? 'Sending...' : resendCooldown > 0 ? `Resend email (${resendCooldown}s)` : 'Resend confirmation email'}
+                </PrimaryButton>
+
+                <SecondaryButton
                   type="button"
                   onClick={() => {
-                    setIsLogin(!isLogin);
-                    form.resetFields();
+                    setSignupSuccessEmail('');
+                    setIsLogin(true);
                   }}
                   style={{
-                    background: 'none',
-                    border: 'none',
-                    color: colors.primary,
-                    cursor: 'pointer',
-                    fontWeight: 500,
-                    padding: 0
+                    width: '100%',
+                    height: '46px',
+                    fontSize: '14px'
                   }}
                 >
-                  {isLogin ? 'Sign up' : 'Log in'}
-                </button>
-              </span>
+                  <ArrowLeftOutlined style={{ fontSize: '12px' }} /> Back to Sign In
+                </SecondaryButton>
+              </div>
             </div>
-          </Form>
+          ) : (
+            /* REGULAR FORM (Login / Signup) */
+            <>
+              {/* Form Header */}
+              <div style={{ textAlign: 'left', marginBottom: '32px' }}>
+                <h2 style={{ fontSize: '26px', fontWeight: typography.weights.semibold, color: colors.textPrimary, marginBottom: '8px', letterSpacing: '-0.5px' }}>
+                  {isLogin ? 'Welcome back' : 'Get started'}
+                </h2>
+                <p style={{ color: colors.textSecondary, fontSize: '14px', margin: 0, fontWeight: 400 }}>
+                  {isLogin ? 'Sign in to continue to Aplico' : 'Create your free account'}
+                </p>
+              </div>
+
+              {/* Form */}
+              <Form form={form} onFinish={isLogin ? handleLogin : handleSignup} layout="vertical">
+                {resendEmail && isLogin && (
+                  <div style={{ marginBottom: '16px' }}>
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="Email Verification"
+                      description={
+                        <div style={{ marginTop: '4px' }}>
+                          <span>Didn't receive a confirmation link? </span>
+                          <button
+                            type="button"
+                            onClick={() => handleResendVerification(resendEmail)}
+                            disabled={resending || resendCooldown > 0}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: colors.primary,
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              padding: 0,
+                              textDecoration: 'underline'
+                            }}
+                          >
+                            {resending ? 'Sending...' : resendCooldown > 0 ? `Resend in (${resendCooldown}s)` : 'Resend verification email'}
+                          </button>
+                        </div>
+                      }
+                    />
+                  </div>
+                )}
+
+                {!isLogin && (
+                  <Form.Item
+                    name="name"
+                    rules={[
+                      { required: true, message: 'Full name is required' },
+                      { whitespace: true, message: 'Full name cannot be empty' }
+                    ]}
+                    style={{ marginBottom: '16px' }}
+                  >
+                    <Input
+                      prefix={<UserOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
+                      placeholder="Full name"
+                      size="large"
+                      style={{
+                        background: colors.background,
+                        border: `1px solid ${colors.borderNeutral}`,
+                        borderRadius: '10px',
+                        color: colors.textPrimary,
+                        height: '46px'
+                      }}
+                    />
+                  </Form.Item>
+                )}
+
+                <Form.Item
+                  name="email"
+                  rules={[
+                    { required: true, message: 'Email address is required' },
+                    { type: 'email', message: 'Please enter a valid email address' }
+                  ]}
+                  style={{ marginBottom: '16px' }}
+                >
+                  <Input
+                    prefix={<MailOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
+                    placeholder="Email address"
+                    size="large"
+                    style={{
+                      background: colors.background,
+                      border: `1px solid ${colors.borderNeutral}`,
+                      borderRadius: '10px',
+                      color: colors.textPrimary,
+                      height: '46px'
+                    }}
+                  />
+                </Form.Item>
+
+                <Form.Item
+                  name="password"
+                  rules={[
+                    { required: true, message: 'Password is required' },
+                    { min: 6, message: 'Password must be at least 6 characters' }
+                  ]}
+                  style={{ marginBottom: isLogin ? '10px' : '16px' }}
+                >
+                  <Input.Password
+                    prefix={<LockOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
+                    placeholder="Password"
+                    size="large"
+                    style={{
+                      background: colors.background,
+                      border: `1px solid ${colors.borderNeutral}`,
+                      borderRadius: '10px',
+                      color: colors.textPrimary,
+                      height: '46px'
+                    }}
+                  />
+                </Form.Item>
+
+                {!isLogin && (
+                  <Form.Item
+                    name="confirmPassword"
+                    dependencies={['password']}
+                    rules={[
+                      { required: true, message: 'Please confirm your password' },
+                      ({ getFieldValue }) => ({
+                        validator(_, value) {
+                          if (!value || getFieldValue('password') === value) {
+                            return Promise.resolve();
+                          }
+                          return Promise.reject(new Error('The passwords do not match'));
+                        },
+                      }),
+                    ]}
+                    style={{ marginBottom: '24px' }}
+                  >
+                    <Input.Password
+                      prefix={<LockOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
+                      placeholder="Confirm password"
+                      size="large"
+                      style={{
+                        background: colors.background,
+                        border: `1px solid ${colors.borderNeutral}`,
+                        borderRadius: '10px',
+                        color: colors.textPrimary,
+                        height: '46px'
+                      }}
+                    />
+                  </Form.Item>
+                )}
+
+                {isLogin && (
+                  <div style={{ textAlign: 'right', marginBottom: '24px' }}>
+                    <a
+                      href="#forgot"
+                      onClick={handleForgotPassword}
+                      style={{ color: colors.primary, fontSize: '13px', fontWeight: 500 }}
+                    >
+                      Forgot password?
+                    </a>
+                  </div>
+                )}
+
+                <PrimaryButton
+                  type="submit"
+                  disabled={loading || authLoading}
+                  style={{
+                    width: '100%',
+                    height: '46px',
+                    fontSize: '15px'
+                  }}
+                >
+                  {loading || authLoading ? 'Processing...' : isLogin ? 'Log In' : 'Create Account'}
+                </PrimaryButton>
+
+                {/* Divider */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  margin: '24px 0'
+                }}>
+                  <div style={{ flex: 1, height: '1px', background: colors.cardBorder }} />
+                  <span style={{ color: colors.textMuted, fontSize: '12px', fontWeight: 500 }}>OR</span>
+                  <div style={{ flex: 1, height: '1px', background: colors.cardBorder }} />
+                </div>
+
+                {/* Social OAuth Buttons */}
+                <div style={{ display: 'flex', gap: '12px', marginBottom: '28px' }}>
+                  <SecondaryButton
+                    type="button"
+                    onClick={handleGoogleLogin}
+                    icon={<GoogleOutlined />}
+                    disabled={loading || authLoading}
+                    style={{
+                      flex: 1,
+                      height: '42px',
+                      fontSize: '13px'
+                    }}
+                  >
+                    Google
+                  </SecondaryButton>
+
+                  <SecondaryButton
+                    type="button"
+                    onClick={handleGithubLogin}
+                    icon={<GithubOutlined />}
+                    disabled={loading || authLoading}
+                    style={{
+                      flex: 1,
+                      height: '42px',
+                      fontSize: '13px'
+                    }}
+                  >
+                    GitHub
+                  </SecondaryButton>
+                </div>
+
+                {/* Switch between Login and Signup */}
+                <div style={{ textAlign: 'center' }}>
+                  <span style={{ color: colors.textSecondary, fontSize: '14px', fontWeight: 400 }}>
+                    {isLogin ? "No account? " : "Already have an account? "}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsLogin(!isLogin);
+                        form.resetFields();
+                      }}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: colors.primary,
+                        cursor: 'pointer',
+                        fontWeight: 500,
+                        padding: 0
+                      }}
+                    >
+                      {isLogin ? 'Sign up' : 'Log in'}
+                    </button>
+                  </span>
+                </div>
+              </Form>
+            </>
+          )}
 
         </div>
       </div>

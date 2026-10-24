@@ -6,6 +6,7 @@ const AuthContext = createContext({
   session: null,
   profile: null,
   loading: true,
+  isEmailVerified: false,
   logout: async () => {},
   signOut: async () => {},
   fetchProfile: async () => {},
@@ -99,6 +100,14 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  const isEmailVerified = Boolean(
+    user?.email_confirmed_at ||
+    user?.confirmed_at ||
+    user?.user_metadata?.email_verified ||
+    user?.app_metadata?.provider === 'google' ||
+    user?.app_metadata?.provider === 'github'
+  );
+
   return (
     <AuthContext.Provider
       value={{
@@ -106,6 +115,7 @@ export const AuthProvider = ({ children }) => {
         session,
         profile,
         loading,
+        isEmailVerified,
         logout,
         signOut: logout,
         fetchProfile: () => fetchProfile(user?.id),

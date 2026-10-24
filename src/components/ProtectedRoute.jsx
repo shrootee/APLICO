@@ -5,7 +5,7 @@ import { Spin } from 'antd';
 import { LoadingOutlined } from '@ant-design/icons';
 
 const ProtectedRoute = ({ children }) => {
-  const { user, session, loading } = useAuth();
+  const { user, session, loading, isEmailVerified } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -32,6 +32,17 @@ const ProtectedRoute = ({ children }) => {
 
   if (!user || !session) {
     return <Navigate to="/auth" replace state={{ from: location }} />;
+  }
+
+  // Enforce email verification on all protected routes
+  if (!isEmailVerified) {
+    return (
+      <Navigate
+        to="/auth?verify=pending"
+        replace
+        state={{ unverifiedEmail: user?.email, from: location }}
+      />
+    );
   }
 
   return children ? children : <Outlet />;
