@@ -18,6 +18,18 @@ import PrimaryButton from './ui/PrimaryButton';
 import SecondaryButton from './ui/SecondaryButton';
 import Card from './ui/Card';
 
+// Helper to format Supabase auth errors (prevents literal '{}' and handles 500 SMTP errors)
+const parseAuthError = (error, fallback = 'An unexpected error occurred') => {
+  if (!error) return fallback;
+  if (error.status >= 500 || error.name === 'AuthRetryableFetchError' || error.message === '{}') {
+    return 'Server error (500): Failed to send confirmation email. Please verify your custom SMTP configuration in Supabase.';
+  }
+  if (error.message && error.message !== '{}') {
+    return error.message;
+  }
+  return fallback;
+};
+
 const AuthPage = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -205,7 +217,7 @@ const AuthPage = () => {
       message.success('Verification email sent! Please check your inbox and spam folder.');
     } catch (err) {
       console.error('Resend error:', err);
-      message.error(err.message || 'Failed to resend verification email');
+      message.error(parseAuthError(err, 'Failed to resend verification email'));
     } finally {
       setResending(false);
     }
@@ -224,11 +236,16 @@ const AuthPage = () => {
       const { error } = await supabase.auth.resetPasswordForEmail(targetEmail.trim().toLowerCase(), {
         redirectTo: `${window.location.origin}/auth?mode=reset`
       });
-      if (error) throw error;
+      if (error) {
+        if (error.status >= 500 || error.name === 'AuthRetryableFetchError' || error.message === '{}') {
+          throw new Error('Server error (500): Unable to send password reset email. Please check your Supabase SMTP settings.');
+        }
+        throw error;
+      }
       message.success('Password reset email sent! Check your inbox.');
     } catch (err) {
       console.error('Password reset error:', err);
-      message.error(err.message || 'Failed to send password reset email');
+      message.error(parseAuthError(err, 'Failed to send password reset email'));
     } finally {
       setLoading(false);
     }
@@ -254,10 +271,13 @@ const AuthPage = () => {
       });
 
       if (error) {
-        if (error.message.includes('email rate limit exceeded') || error.code === 'over_email_send_rate_limit') {
+        if (error.status >= 500 || error.name === 'AuthRetryableFetchError' || error.message === '{}') {
+          throw new Error('Server error (500): Failed to send confirmation email. Please check your custom SMTP configuration in Supabase.');
+        }
+        if (error.message?.includes('email rate limit exceeded') || error.code === 'over_email_send_rate_limit') {
           throw new Error('Sign-up rate limit reached. Please wait a few minutes before trying again.');
         }
-        if (error.message.includes('User already registered') || error.code === 'user_already_exists') {
+        if (error.message?.includes('User already registered') || error.code === 'user_already_exists') {
           message.warning('An account with this email already exists. Please log in.');
           setIsLogin(true);
           form.setFieldsValue({ email: cleanEmail, password: '', confirmPassword: '' });
@@ -286,7 +306,7 @@ const AuthPage = () => {
       }
     } catch (error) {
       console.error('Signup error:', error);
-      message.error(error.message || 'Failed to create account');
+      message.error(parseAuthError(error, 'Failed to create account'));
     } finally {
       setLoading(false);
     }
@@ -303,10 +323,13 @@ const AuthPage = () => {
       });
 
       if (error) {
-        if (error.message.includes('Invalid login credentials')) {
+        if (error.status >= 500 || error.name === 'AuthRetryableFetchError' || error.message === '{}') {
+          throw new Error('Server error (500): Unable to reach the authentication service. Please try again.');
+        }
+        if (error.message?.includes('Invalid login credentials')) {
           throw new Error('Invalid email or password. Please check your credentials.');
         }
-        if (error.message.includes('Email not confirmed') || error.code === 'email_not_confirmed') {
+        if (error.message?.includes('Email not confirmed') || error.code === 'email_not_confirmed') {
           setResendEmail(cleanEmail);
           throw new Error('Email not verified. Please check your inbox or click "Resend verification" below.');
         }
@@ -317,7 +340,7 @@ const AuthPage = () => {
       // Auth state listener triggers handleAuthRedirect to route user appropriately
     } catch (error) {
       console.error('Login error:', error);
-      message.error(error.message || 'Failed to login');
+      message.error(parseAuthError(error, 'Failed to login'));
     } finally {
       setLoading(false);
     }
