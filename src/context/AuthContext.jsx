@@ -7,6 +7,7 @@ const AuthContext = createContext({
   profile: null,
   loading: true,
   logout: async () => {},
+  signOut: async () => {},
   fetchProfile: async () => {},
 });
 
@@ -106,6 +107,7 @@ export const AuthProvider = ({ children }) => {
         profile,
         loading,
         logout,
+        signOut: logout,
         fetchProfile: () => fetchProfile(user?.id),
       }}
     >

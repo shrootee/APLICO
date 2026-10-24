@@ -2,14 +2,15 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/Supabase.js';
-import { Input, Form, message } from 'antd';
+import { Input, Form, message, Alert } from 'antd';
 import {
   MailOutlined,
   LockOutlined,
   UserOutlined,
   GoogleOutlined,
   GithubOutlined,
-  ArrowLeftOutlined
+  ArrowLeftOutlined,
+  ReloadOutlined
 } from '@ant-design/icons';
 import { colors, typography } from '../theme/tokens';
 import BrandLogo from './ui/BrandLogo';
@@ -26,8 +27,11 @@ const AuthPage = () => {
   const searchParams = new URLSearchParams(location.search);
   const initialMode = searchParams.get('mode');
 
+  const [form] = Form.useForm();
   const [isLogin, setIsLogin] = useState(initialMode !== 'signup');
   const [loading, setLoading] = useState(false);
+  const [resendEmail, setResendEmail] = useState('');
+  const [resending, setResending] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const callbackProcessed = useRef(false);
 
@@ -78,30 +82,44 @@ const AuthPage = () => {
 
       try {
         // Check if user has a profile record
-        const { data: profile } = await supabase
+        const { data: profile, error: profileSelectError } = await supabase
           .from('profile')
-          .select('*')
+          .select('id, name, goal')
           .eq('id', user.id)
           .maybeSingle();
 
-        if (!profile) {
-          // New User (e.g. via Google OAuth or fresh signup)
-          const userFullName = user.user_metadata?.full_name || user.user_metadata?.name || '';
+        if (profileSelectError && profileSelectError.code !== 'PGRST116') {
+          console.error('Error fetching profile:', profileSelectError);
+        }
 
-          await supabase
+        if (!profile) {
+          // New User (e.g. via Google OAuth, GitHub OAuth, or direct email signup)
+          const userName =
+            user.user_metadata?.full_name ||
+            user.user_metadata?.name ||
+            user.user_metadata?.user_name ||
+            user.email?.split('@')[0] ||
+            'User';
+
+          const { error: insertError } = await supabase
             .from('profile')
             .upsert([
               {
                 id: user.id,
-                full_name: userFullName,
-                name: userFullName,
+                name: userName,
                 email: user.email,
-                avatar_url: user.user_metadata?.avatar_url || null,
                 created_at: new Date().toISOString(),
               }
             ], { onConflict: 'id' });
 
-          message.success('Account created! Please complete your profile.');
+          if (insertError) {
+            console.error('Error creating profile on auth redirect:', insertError);
+          }
+
+          message.success('Account ready! Please complete your onboarding questionnaire.');
+          navigate('/signup', { replace: true });
+        } else if (!profile.goal) {
+          // Incomplete profile questionnaire
           navigate('/signup', { replace: true });
         } else {
           // Returning User with profile
@@ -119,7 +137,7 @@ const AuthPage = () => {
     handleAuthRedirect();
   }, [user, session, authLoading, navigate, location]);
 
-  // Handle Google Login
+  // Handle Google Login (Preserved existing implementation)
   const handleGoogleLogin = async () => {
     try {
       setLoading(true);
@@ -143,44 +161,128 @@ const AuthPage = () => {
     }
   };
 
+  // Handle GitHub Login
+  const handleGithubLogin = async () => {
+    try {
+      setLoading(true);
+
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'github',
+        options: {
+          redirectTo: `${window.location.origin}/auth`
+        }
+      });
+
+      if (error) {
+        console.error('GitHub login error:', error.message);
+        message.error(error.message || 'Failed to initialize GitHub login. Please ensure GitHub OAuth is enabled in Supabase.');
+      }
+    } catch (error) {
+      console.error('Unexpected login error:', error);
+      message.error(error?.message || 'Unexpected error during GitHub login');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Resend verification email
+  const handleResendVerification = async () => {
+    const targetEmail = resendEmail || form.getFieldValue('email');
+    if (!targetEmail) {
+      message.warning('Please enter your email address first.');
+      return;
+    }
+    try {
+      setResending(true);
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email: targetEmail.trim().toLowerCase(),
+        options: {
+          emailRedirectTo: `${window.location.origin}/auth`
+        }
+      });
+      if (error) throw error;
+      message.success('Verification email sent! Please check your inbox and spam folder.');
+    } catch (err) {
+      console.error('Resend error:', err);
+      message.error(err.message || 'Failed to resend verification email');
+    } finally {
+      setResending(false);
+    }
+  };
+
+  // Forgot password
+  const handleForgotPassword = async (e) => {
+    e?.preventDefault();
+    const targetEmail = form.getFieldValue('email');
+    if (!targetEmail) {
+      message.warning('Please enter your email address above to reset your password.');
+      return;
+    }
+    try {
+      setLoading(true);
+      const { error } = await supabase.auth.resetPasswordForEmail(targetEmail.trim().toLowerCase(), {
+        redirectTo: `${window.location.origin}/auth?mode=reset`
+      });
+      if (error) throw error;
+      message.success('Password reset email sent! Check your inbox.');
+    } catch (err) {
+      console.error('Password reset error:', err);
+      message.error(err.message || 'Failed to send password reset email');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Email Signup Handler - NEW USER
   const handleSignup = async (values) => {
     try {
       setLoading(true);
+      const cleanEmail = values.email?.trim().toLowerCase();
+      const cleanName = values.name?.trim() || '';
+
       const { data, error } = await supabase.auth.signUp({
-        email: values.email,
+        email: cleanEmail,
         password: values.password,
         options: {
           data: {
-            full_name: values.name,
-            name: values.name,
-          }
+            full_name: cleanName,
+            name: cleanName,
+          },
+          emailRedirectTo: `${window.location.origin}/auth`,
         }
       });
 
-      if (error) throw error;
-
-      if (data?.user) {
-        await supabase
-          .from('profile')
-          .upsert([
-            {
-              id: data.user.id,
-              full_name: values.name || '',
-              name: values.name || '',
-              email: values.email,
-              created_at: new Date().toISOString()
-            }
-          ], { onConflict: 'id' });
-
-        if (data.session) {
-          message.success('Account created! Please complete your profile.');
-          navigate('/signup', { replace: true });
-        } else {
-          message.info('Account registered! Please check your email to confirm.');
-          setIsLogin(true);
+      if (error) {
+        if (error.message.includes('email rate limit exceeded') || error.code === 'over_email_send_rate_limit') {
+          throw new Error('Sign-up rate limit reached. Please wait a few minutes before trying again.');
         }
+        if (error.message.includes('User already registered') || error.code === 'user_already_exists') {
+          message.warning('An account with this email already exists. Please log in.');
+          setIsLogin(true);
+          form.setFieldsValue({ email: cleanEmail, password: '', confirmPassword: '' });
+          return;
+        }
+        throw error;
+      }
+
+      // Check for duplicate account where Supabase user enumeration protection returned empty identities
+      if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        message.warning('An account with this email already exists. Please log in.');
+        setIsLogin(true);
+        form.setFieldsValue({ email: cleanEmail, password: '', confirmPassword: '' });
+        return;
+      }
+
+      if (data?.session) {
+        // Immediate session created (email confirmation disabled in Supabase)
+        message.success('Account created! Welcome to Aplico.');
+      } else if (data?.user) {
+        // Supabase email confirmation is enabled
+        setResendEmail(cleanEmail);
+        message.success('Account registered! Please check your email inbox to verify your account before logging in.', 6);
+        setIsLogin(true);
+        form.setFieldsValue({ email: cleanEmail, password: '', confirmPassword: '' });
       }
     } catch (error) {
       console.error('Signup error:', error);
@@ -194,15 +296,25 @@ const AuthPage = () => {
   const handleLogin = async (values) => {
     try {
       setLoading(true);
-      const { error } = await supabase.auth.signInWithPassword({
-        email: values.email,
+      const cleanEmail = values.email?.trim().toLowerCase();
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
         password: values.password,
       });
 
-      if (error) throw error;
+      if (error) {
+        if (error.message.includes('Invalid login credentials')) {
+          throw new Error('Invalid email or password. Please check your credentials.');
+        }
+        if (error.message.includes('Email not confirmed') || error.code === 'email_not_confirmed') {
+          setResendEmail(cleanEmail);
+          throw new Error('Email not verified. Please check your inbox or click "Resend verification" below.');
+        }
+        throw error;
+      }
 
       message.success('Welcome back to Aplico!');
-      navigate('/dashboard', { replace: true });
+      // Auth state listener triggers handleAuthRedirect to route user appropriately
     } catch (error) {
       console.error('Login error:', error);
       message.error(error.message || 'Failed to login');
@@ -371,11 +483,45 @@ const AuthPage = () => {
           </div>
 
           {/* Form */}
-          <Form onFinish={isLogin ? handleLogin : handleSignup} layout="vertical">
+          <Form form={form} onFinish={isLogin ? handleLogin : handleSignup} layout="vertical">
+            {resendEmail && isLogin && (
+              <div style={{ marginBottom: '16px' }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="Email Verification"
+                  description={
+                    <div style={{ marginTop: '4px' }}>
+                      <span>Didn't receive a confirmation link? </span>
+                      <button
+                        type="button"
+                        onClick={handleResendVerification}
+                        disabled={resending}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: colors.primary,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          padding: 0,
+                          textDecoration: 'underline'
+                        }}
+                      >
+                        {resending ? 'Sending...' : 'Resend verification email'}
+                      </button>
+                    </div>
+                  }
+                />
+              </div>
+            )}
+
             {!isLogin && (
               <Form.Item
                 name="name"
-                rules={[{ required: true, message: 'Full name is required' }]}
+                rules={[
+                  { required: true, message: 'Full name is required' },
+                  { whitespace: true, message: 'Full name cannot be empty' }
+                ]}
                 style={{ marginBottom: '16px' }}
               >
                 <Input
@@ -395,7 +541,10 @@ const AuthPage = () => {
 
             <Form.Item
               name="email"
-              rules={[{ required: true, type: 'email', message: 'Valid email required' }]}
+              rules={[
+                { required: true, message: 'Email address is required' },
+                { type: 'email', message: 'Please enter a valid email address' }
+              ]}
               style={{ marginBottom: '16px' }}
             >
               <Input
@@ -414,8 +563,11 @@ const AuthPage = () => {
 
             <Form.Item
               name="password"
-              rules={[{ required: true, message: 'Password is required' }]}
-              style={{ marginBottom: isLogin ? '10px' : '24px' }}
+              rules={[
+                { required: true, message: 'Password is required' },
+                { min: 6, message: 'Password must be at least 6 characters' }
+              ]}
+              style={{ marginBottom: isLogin ? '10px' : '16px' }}
             >
               <Input.Password
                 prefix={<LockOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
@@ -431,9 +583,47 @@ const AuthPage = () => {
               />
             </Form.Item>
 
+            {!isLogin && (
+              <Form.Item
+                name="confirmPassword"
+                dependencies={['password']}
+                rules={[
+                  { required: true, message: 'Please confirm your password' },
+                  ({ getFieldValue }) => ({
+                    validator(_, value) {
+                      if (!value || getFieldValue('password') === value) {
+                        return Promise.resolve();
+                      }
+                      return Promise.reject(new Error('The passwords do not match'));
+                    },
+                  }),
+                ]}
+                style={{ marginBottom: '24px' }}
+              >
+                <Input.Password
+                  prefix={<LockOutlined style={{ color: colors.textMuted, marginRight: '8px' }} />}
+                  placeholder="Confirm password"
+                  size="large"
+                  style={{
+                    background: colors.background,
+                    border: `1px solid ${colors.borderNeutral}`,
+                    borderRadius: '10px',
+                    color: colors.textPrimary,
+                    height: '46px'
+                  }}
+                />
+              </Form.Item>
+            )}
+
             {isLogin && (
               <div style={{ textAlign: 'right', marginBottom: '24px' }}>
-                <a href="#" style={{ color: colors.primary, fontSize: '13px', fontWeight: 500 }}>Forgot password?</a>
+                <a
+                  href="#forgot"
+                  onClick={handleForgotPassword}
+                  style={{ color: colors.primary, fontSize: '13px', fontWeight: 500 }}
+                >
+                  Forgot password?
+                </a>
               </div>
             )}
 
@@ -479,7 +669,9 @@ const AuthPage = () => {
 
               <SecondaryButton
                 type="button"
+                onClick={handleGithubLogin}
                 icon={<GithubOutlined />}
+                disabled={loading || authLoading}
                 style={{
                   flex: 1,
                   height: '42px',
@@ -496,7 +688,10 @@ const AuthPage = () => {
                 {isLogin ? "No account? " : "Already have an account? "}
                 <button
                   type="button"
-                  onClick={() => setIsLogin(!isLogin)}
+                  onClick={() => {
+                    setIsLogin(!isLogin);
+                    form.resetFields();
+                  }}
                   style={{
                     background: 'none',
                     border: 'none',
