@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Job Application Portal Test Form | Aplico Extension Verification</title>
+  <style>
+    :root {
+      --bg: #F8FAFC;
+      --card-bg: #FFFFFF;
+      --border: #E2E8F0;
+      --text: #0F172A;
+      --text-muted: #64748B;
+      --primary: #2563EB;
+      --teal: #10B981;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 40px 20px;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 680px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 36px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+    .header-badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      color: #0369A1;
+      background: #E0F2FE;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .job-meta {
+      font-size: 13.5px;
+      color: var(--text-muted);
+      margin-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+    }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .label-hint {
+      font-size: 12px;
+      font-weight: 400;
+      color: var(--text-muted);
+      margin-left: 6px;
+    }
+    input[type="text"], input[type="email"], input[type="tel"] {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+      outline: none;
+    }
+    .upload-zone {
+      border: 2px dashed #CBD5E1;
+      border-radius: 12px;
+      padding: 24px;
+      text-align: center;
+      background: #F8FAFC;
+      transition: all 0.2s ease;
+      position: relative;
+    }
+    .upload-zone.has-file {
+      border-color: var(--teal);
+      background: #ECFDF5;
+    }
+    .file-input {
+      display: block;
+      margin: 12px auto;
+      font-size: 13px;
+    }
+    .file-status-box {
+      margin-top: 14px;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      display: none;
+    }
+    .file-status-box.active {
+      display: block;
+      background: #D1FAE5;
+      color: #065F46;
+      border: 1px solid #A7F3D0;
+    }
+    .instructions-box {
+      margin-top: 32px;
+      padding: 16px 20px;
+      background: #F1F5F9;
+      border-radius: 10px;
+      border-left: 4px solid #3B82F6;
+      font-size: 13px;
+      color: #334155;
+    }
+    .instructions-box h3 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: #1E293B;
+    }
+    .instructions-box ol {
+      margin-left: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .btn-submit {
+      margin-top: 24px;
+      padding: 12px 24px;
+      background: var(--text);
+      color: #FFF;
+      font-weight: 600;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <span class="header-badge">Careers Portal Simulation</span>
+    <h1>Senior Software Engineer — Platform Infrastructure</h1>
+    <div class="job-meta">Aplico Inc. • San Francisco, CA (or Remote) • Full-Time</div>
+
+    <form id="job-application-form">
+      <div class="form-group">
+        <label for="applicant-name">Full Name</label>
+        <input type="text" id="applicant-name" name="name" value="Alex Developer" required>
+      </div>
+
+      <div class="form-group">
+        <label for="applicant-email">Email Address</label>
+        <input type="email" id="applicant-email" name="email" value="alex@example.com" required>
+      </div>
+
+      <div class="form-group">
+        <label for="applicant-phone">Phone Number</label>
+        <input type="tel" id="applicant-phone" name="phone" value="+1 (555) 019-2834">
+      </div>
+
+      <!-- RESUME UPLOAD SECTION -->
+      <div class="form-group">
+        <label for="resume-input">
+          Upload Resume / CV
+          <span class="label-hint">(PDF, DOC, DOCX up to 5MB)</span>
+        </label>
+        
+        <div id="upload-zone" class="upload-zone">
+          <p style="font-size: 13.5px; color: #475569; margin-bottom: 8px;">
+            Select a resume from your computer or click the <strong>Aplico Extension</strong> to attach automatically.
+          </p>
+          
+          <input
+            type="file"
+            id="resume-input"
+            name="resume"
+            accept=".pdf,.doc,.docx,application/pdf"
+            class="file-input"
+            aria-label="Upload Resume"
+          />
+
+          <!-- Form Recognition Feedback Box -->
+          <div id="file-status-box" class="file-status-box">
+            <span id="file-status-text">No file attached yet.</span>
+          </div>
+        </div>
+      </div>
+
+      <button type="button" class="btn-submit" onclick="alert('This is a test fixture. Do not submit.');">
+        Submit Application (Mock)
+      </button>
+    </form>
+
+    <!-- TEST INSTRUCTIONS -->
+    <div class="instructions-box">
+      <h3>Testing with the Aplico Extension:</h3>
+      <ol>
+        <li>Load the unpacked extension in Chrome Developer Mode from <code>aplico-extension/</code>.</li>
+        <li>Open this HTML file in Chrome (e.g. <code>http://localhost:5173/aplico-extension/test/test-form.html</code> or <code>file:///...</code>).</li>
+        <li>Click the <strong>Aplico extension icon</strong> in the Chrome toolbar.</li>
+        <li>Sign in with your Aplico account and select any saved resume.</li>
+        <li>Click <strong>"Use this resume"</strong>.</li>
+        <li>Notice the green check banner above, proving that the web form recognized the injected PDF file!</li>
+      </ol>
+    </div>
+  </div>
+
+  <script>
+    const resumeInput = document.getElementById('resume-input');
+    const uploadZone = document.getElementById('upload-zone');
+    const statusBox = document.getElementById('file-status-box');
+    const statusText = document.getElementById('file-status-text');
+
+    function updateFormDisplay() {
+      if (resumeInput.files && resumeInput.files.length > 0) {
+        const file = resumeInput.files[0];
+        const sizeKb = (file.size / 1024).toFixed(1);
+        uploadZone.classList.add('has-file');
+        statusBox.classList.add('active');
+        statusText.innerHTML = `
+          <strong>✓ Resume Attached:</strong> ${file.name} (${sizeKb} KB, ${file.type || 'application/pdf'})
+          <br><span style="font-size: 11.5px; color: #047857;">Web form change event fired & verified successfully!</span>
+        `;
+      } else {
+        uploadZone.classList.remove('has-file');
+        statusBox.classList.remove('active');
+        statusText.textContent = 'No file attached yet.';
+      }
+    }
+
+    resumeInput.addEventListener('change', updateFormDisplay);
+    resumeInput.addEventListener('input', updateFormDisplay);
+  </script>
+</body>
+</html>

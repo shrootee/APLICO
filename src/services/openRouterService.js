@@ -2,76 +2,18 @@
  * Centralized OpenRouter AI Pipeline Service
  * Powers ATS Resume Checking and Semantic Job Matching
  */
-
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-
-// Primary and fallback models for maximum reliability
-const AI_MODELS = [
-  'google/gemini-2.5-flash',
-  'meta-llama/llama-3.3-70b-instruct',
-  'openai/gpt-4o-mini',
-  'qwen/qwen-2.5-72b-instruct',
-];
+import { callServerAi } from './ats/atsApiClient.js';
 
 /**
- * Helper to call OpenRouter API with standard headers & fallback models
+ * Helper to call OpenRouter API via secure server-side endpoint
  */
 async function callOpenRouterAI(systemPrompt, userPrompt) {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-
-  if (!apiKey || apiKey.includes('YOUR_KEY')) {
-    console.warn('[OpenRouter AI] No valid VITE_OPENROUTER_API_KEY found in environment.');
-    return null;
+  try {
+    const data = await callServerAi(systemPrompt, userPrompt);
+    if (data) return data;
+  } catch (err) {
+    console.warn('[OpenRouter AI] Server endpoint call failed:', err);
   }
-
-  let lastError = null;
-
-  for (const model of AI_MODELS) {
-    try {
-      const response = await fetch(OPENROUTER_API_URL, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173',
-          'X-Title': 'Aplico AI ATS & Job Matcher',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          response_format: { type: 'json_object' },
-          temperature: 0.2,
-          max_tokens: 3000,
-        }),
-      });
-
-      if (!response.ok) {
-        const errBody = await response.text();
-        console.warn(`[OpenRouter AI] Model ${model} returned HTTP ${response.status}:`, errBody);
-        lastError = new Error(`HTTP ${response.status}: ${errBody}`);
-        continue; // Try next model
-      }
-
-      const data = await response.json();
-      const contentStr = data.choices?.[0]?.message?.content;
-
-      if (!contentStr) {
-        throw new Error('Empty completion content returned from OpenRouter');
-      }
-
-      // Parse JSON output safely
-      const cleanJson = contentStr.replace(/```json\n?|\n?```/g, '').trim();
-      return JSON.parse(cleanJson);
-    } catch (err) {
-      console.warn(`[OpenRouter AI] Error with model ${model}:`, err.message);
-      lastError = err;
-    }
-  }
-
-  console.error('[OpenRouter AI] All OpenRouter models failed or rate limited.', lastError);
   return null;
 }
 

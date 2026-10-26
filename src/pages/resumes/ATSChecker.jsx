@@ -3,7 +3,9 @@ import { supabase } from '../../lib/Supabase';
 import { useAuth } from '../../context/AuthContext';
 import ResumeCard from '../../components/resume/ResumeCard';
 import { extractTextFromFile } from '../../services/resumeTextExtractor';
-import { analyzeResumeATS } from '../../services/openRouterService';
+import { runAtsAnalysis, generateLegacyReportFallback } from '../../services/ats/atsEngine.js';
+import { callServerAi } from '../../services/ats/atsApiClient.js';
+import { UnreadableResumeError } from '../../services/ats/resumeParser.js';
 import {
   UploadOutlined,
   FilePdfOutlined,
@@ -21,6 +23,14 @@ import {
   SearchOutlined,
   ArrowLeftOutlined,
   DownloadOutlined,
+  SafetyCertificateOutlined,
+  ThunderboltOutlined,
+  InfoCircleOutlined,
+  FileTextOutlined,
+  ExclamationCircleOutlined,
+  FireOutlined,
+  CheckOutlined,
+  CloseOutlined,
 } from '@ant-design/icons';
 import {
   Button,
@@ -38,6 +48,7 @@ import {
   Divider,
   Modal,
   Tooltip,
+  Collapse,
 } from 'antd';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
@@ -49,157 +60,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 import { colors } from '../../colors';
 
+const { TextArea } = Input;
 const COLORS = colors;
-
 const BUCKET_NAME = 'MyResume';
-
-// Generate Comprehensive University-Style Report Card
-const generateReportCard = (resumeText, resumeName, targetRole) => {
-  const text = (resumeText || '').toLowerCase();
-  const wordCount = text.split(/\s+/).filter(Boolean).length;
-
-  const evaluateCategory = (name, keywords, weight = 1) => {
-    let matches = 0;
-    keywords.forEach((kw) => {
-      if (text.includes(kw.toLowerCase())) matches++;
-    });
-    const ratio = Math.min(1, (matches / Math.max(1, keywords.length * 0.4)) * weight);
-    const percentage = Math.round(Math.min(98, Math.max(48, ratio * 100)));
-    const score = (percentage / 10).toFixed(1);
-    return { name, score: parseFloat(score), percentage };
-  };
-
-  const categories = [
-    {
-      ...evaluateCategory('Formatting', ['margin', 'font', 'bullet', 'section', 'header', 'clean']),
-      explanation: 'Structure is clear with standardized section headings and parseable layout.',
-    },
-    {
-      ...evaluateCategory('ATS Compatibility', ['skills', 'experience', 'education', 'email', 'phone', 'summary']),
-      explanation: 'High parseability across major ATS platforms (Workday, Greenhouse, Lever).',
-    },
-    {
-      ...evaluateCategory('Keyword Optimization', ['javascript', 'python', 'react', 'sql', 'aws', 'docker', 'git', 'api']),
-      explanation: 'Includes essential industry keywords relevant to target technical role requirements.',
-    },
-    {
-      ...evaluateCategory('Skills', ['framework', 'database', 'cloud', 'architecture', 'full stack', 'backend']),
-      explanation: 'Core technical competencies are clearly defined and grouped appropriately.',
-    },
-    {
-      ...evaluateCategory('Experience', ['developed', 'managed', 'led', 'designed', 'built', 'implemented', 'scaled']),
-      explanation: 'Work history reflects progressive responsibility and practical experience.',
-    },
-    {
-      ...evaluateCategory('Projects', ['github', 'deployed', 'application', 'system', 'features', 'users', 'stack']),
-      explanation: 'Demonstrates practical application through concrete projects and builds.',
-    },
-    {
-      ...evaluateCategory('Education', ['bachelor', 'degree', 'computer science', 'university', 'gpa', 'coursework']),
-      explanation: 'Educational background and academic achievements are clearly formatted.',
-    },
-    {
-      ...evaluateCategory('Achievements', ['award', 'first place', 'top', 'increased', 'reduced', 'improved', 'saved']),
-      explanation: 'Includes recognized accomplishments and quantifiable milestones.',
-    },
-    {
-      ...evaluateCategory('Leadership', ['led', 'mentored', 'organized', 'captain', 'president', 'initiative']),
-      explanation: 'Shows evidence of teamwork, collaboration, or leadership initiative.',
-    },
-    {
-      ...evaluateCategory('Certifications', ['certified', 'aws', 'google', 'meta', 'coursera', 'udemy', 'certificate']),
-      explanation: 'Professional credentials and continuous learning are documented.',
-    },
-    {
-      ...evaluateCategory('Grammar', ['the', 'and', 'with', 'for', 'experience', 'responsible']),
-      explanation: 'Professional tone with strong grammatical precision throughout.',
-    },
-    {
-      ...evaluateCategory('Readability', ['concise', 'clear', 'impact', 'delivered'], 1.1),
-      explanation: 'Information density is well-balanced and easy for recruiters to scan in 10 seconds.',
-    },
-    {
-      ...evaluateCategory('Action Verbs', ['spearheaded', 'architected', 'engineered', 'streamlined', 'optimized', 'executed']),
-      explanation: 'Uses active voice and power verbs to highlight individual contributions.',
-    },
-    {
-      ...evaluateCategory('Impact', ['%', 'k', 'ms', 'users', 'revenue', 'performance', 'latency', 'efficiency']),
-      explanation: 'Quantifies outcomes using specific metrics and data points.',
-    },
-    {
-      ...evaluateCategory('Consistency', ['2023', '2024', 'present', 'january', 'february'], 1.05),
-      explanation: 'Date formatting, bullet point punctuation, and styling remain uniform.',
-    },
-  ];
-
-  const totalPercentage = categories.reduce((sum, c) => sum + c.percentage, 0);
-  const avgPercentage = Math.round(totalPercentage / categories.length);
-  const atsScore = Math.min(96, Math.max(58, avgPercentage));
-
-  let grade = 'C';
-  if (atsScore >= 92) grade = 'A+';
-  else if (atsScore >= 86) grade = 'A';
-  else if (atsScore >= 80) grade = 'B+';
-  else if (atsScore >= 74) grade = 'B';
-  else if (atsScore >= 68) grade = 'C+';
-  else if (atsScore >= 62) grade = 'C';
-  else grade = 'D';
-
-  const cgpa = (atsScore / 10).toFixed(1);
-
-  let hiringProbability = 'Medium';
-  let hiringRationale = 'Solid candidate foundation. Adding more quantified metrics will boost interview callbacks.';
-  if (atsScore >= 86) {
-    hiringProbability = 'Very High';
-    hiringRationale = 'Top candidate profile. High likelihood of passing automated ATS screens and recruiter review.';
-  } else if (atsScore >= 76) {
-    hiringProbability = 'High';
-    hiringRationale = 'Strong candidate profile. Passes standard ATS criteria with good keyword alignment.';
-  } else if (atsScore < 66) {
-    hiringProbability = 'Low';
-    hiringRationale = 'Requires structural formatting updates and stronger impact statements to pass competitive screens.';
-  }
-
-  const sortedCategories = [...categories].sort((a, b) => b.percentage - a.percentage);
-  const strengths = [
-    `Strong alignment in ${sortedCategories[0].name} (${sortedCategories[0].percentage}% score).`,
-    `Effective demonstration of ${sortedCategories[1].name} and core technical competencies.`,
-    `Clean document structure with parseable typography and standardized headers.`,
-    wordCount > 300 ? `Comprehensive depth across core technical topics.` : `Concise layout suitable for quick recruiter scanning.`,
-  ];
-
-  const weaknesses = [
-    `${sortedCategories[sortedCategories.length - 1].name} needs enhancement (scored ${sortedCategories[sortedCategories.length - 1].percentage}%).`,
-    `Impact metrics: Add specific numbers (e.g. "% increase", "ms speedup", "X users served").`,
-    `Keywords: Include extra role-specific framework and tool names in your skills section.`,
-  ];
-
-  const aiSuggestions = [
-    `Replace generic responsibility phrases ("responsible for...") with active achievements ("Architected X using Y resulting in Z").`,
-    `Group technical skills into clear categories: Languages, Frameworks, Developer Tools, Databases, Cloud Services.`,
-    `Add a 2-line Professional Summary at the top tailoring your background directly to ${targetRole || 'your target role'}.`,
-    `Ensure all bullet points follow the Google XYZ formula: "Accomplished [X] as measured by [Y], by doing [Z]".`,
-  ];
-
-  const recruiterFeedback = `Candidate exhibits a solid background for a ${targetRole || 'Software Engineering'} position. The overall structure is clean and easy to scan. To convert more recruiter screens into interview invites, focus on quantifying project outcomes with measurable business metrics and highlighting core cloud or systems engineering tools.`;
-
-  const summary = `Resume for ${resumeName} tailored towards ${targetRole || 'Tech Roles'}. Evaluated with an overall score of ${atsScore}% (${grade} Grade, ${cgpa}/10 rating).`;
-
-  return {
-    atsScore,
-    grade,
-    cgpa: `${cgpa} / 10`,
-    hiringProbability,
-    hiringRationale,
-    categories,
-    strengths,
-    weaknesses,
-    aiSuggestions,
-    recruiterFeedback,
-    summary,
-    evaluatedAt: new Date().toISOString(),
-  };
-};
 
 const ATSChecker = () => {
   const { user } = useAuth();
@@ -212,10 +75,17 @@ const ATSChecker = () => {
   const [selectedResume, setSelectedResume] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [targetRole, setTargetRole] = useState('');
+  const [jobDescriptionText, setJobDescriptionText] = useState('');
+  const [showJdInput, setShowJdInput] = useState(false);
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
+  const [analysisStatusText, setAnalysisStatusText] = useState('Analyzing Resume Content...');
   const [currentAnalysis, setCurrentAnalysis] = useState(null);
+  const [unreadableErrorModal, setUnreadableErrorModal] = useState(null);
+
+  // Active sub-tab inside the report view: 'skills' | 'breakdown' | 'suggestions' | 'categories'
+  const [reportSubTab, setReportSubTab] = useState('skills');
 
   // History Tab state
   const [historyReportView, setHistoryReportView] = useState(null);
@@ -229,19 +99,13 @@ const ATSChecker = () => {
   const [previewLoading, setPreviewLoading] = useState(false);
 
   const fileInputRef = useRef(null);
+  const jdFileInputRef = useRef(null);
 
   const getFileIcon = (fileType) => {
     if (fileType === 'application/pdf' || fileType?.endsWith?.('.pdf')) {
       return <FilePdfOutlined style={{ fontSize: 32, color: '#FF0000' }} />;
     }
     return <FileWordOutlined style={{ fontSize: 32, color: '#2B579A' }} />;
-  };
-
-  const formatFileSize = (bytes) => {
-    if (!bytes) return '0 B';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   };
 
   // Helper: Retrieve stored analysis (Supabase first, local cache fallback)
@@ -257,7 +121,7 @@ const ATSChecker = () => {
         .maybeSingle();
 
       if (error) {
-        console.error('[Supabase Fetch Error]:', error);
+        console.warn('[Supabase Fetch Error]:', error);
       }
 
       if (data && data.report_data) {
@@ -268,7 +132,7 @@ const ATSChecker = () => {
         return parsed;
       }
     } catch (err) {
-      console.error('[Supabase Fetch Exception]:', err);
+      console.warn('[Supabase Fetch Exception]:', err);
     }
 
     // Fallback to local cache if offline
@@ -283,16 +147,15 @@ const ATSChecker = () => {
   // Helper: Save analysis report to Supabase DB & Local Cache
   const saveStoredAnalysisToDB = useCallback(async (resumeId, resumeName, role, report) => {
     if (!userId || !resumeId) {
-      const err = new Error(`Cannot save analysis: missing userId (${userId}) or resumeId (${resumeId})`);
-      console.error('[Supabase Save Aborted]:', err);
-      throw err;
+      console.warn('[Supabase Save Aborted]: missing userId or resumeId');
+      return;
     }
 
     const payload = {
       user_id: userId,
       resume_id: resumeId.toString(),
       resume_name: resumeName || 'Untitled Resume',
-      target_role: role || 'General Role',
+      target_role: role || report?.jobTitle || 'General Role',
       ats_score: report?.atsScore ?? 0,
       grade: report?.grade || 'N/A',
       cgpa: report?.cgpa || 'N/A',
@@ -301,32 +164,23 @@ const ATSChecker = () => {
       updated_at: new Date().toISOString(),
     };
 
-    console.log('[1. Supabase Analysis Payload]:', payload);
+    try {
+      const response = await supabase
+        .from('resume_analyses')
+        .upsert(payload, { onConflict: 'user_id,resume_id' })
+        .select();
 
-    // Single direct upsert to resume_analyses
-    const response = await supabase
-      .from('resume_analyses')
-      .upsert(payload, { onConflict: 'user_id,resume_id' })
-      .select();
-
-    console.log('[2. Supabase Upsert Response]:', response);
-
-    if (response.error) {
-      console.error('[3. Supabase Upsert Error]:', response.error);
-      throw response.error;
+      if (response.error) {
+        console.warn('[Supabase Upsert Warning]:', response.error.message);
+      }
+    } catch (dbErr) {
+      console.warn('[Supabase Save Non-fatal]:', dbErr);
     }
 
-    const insertedRow = response.data?.[0] || response.data;
-    console.log('[4. Supabase Inserted Row]:', insertedRow);
-
-    // Update Local Cache
+    // Always update Local Cache
     try {
       localStorage.setItem(`ats_report_${resumeId}_${userId}`, JSON.stringify(report));
-    } catch (e) {
-      console.warn('localStorage cache update note:', e);
-    }
-
-    return insertedRow;
+    } catch (e) { }
   }, [userId]);
 
   // Fetch Existing Resumes from Supabase
@@ -393,28 +247,9 @@ const ATSChecker = () => {
     loadHistoryFromDB();
   }, [fetchResumes, loadHistoryFromDB]);
 
-  // Extract text from File (PDF or DOCX)
-  const extractTextFromFile = async (fileObj) => {
-    const fileName = fileObj.name.toLowerCase();
-    const arrayBuffer = await fileObj.arrayBuffer();
-
-    if (fileName.endsWith('.docx') || fileObj.type.includes('word')) {
-      const result = await mammoth.extractRawText({ arrayBuffer });
-      return result.value || '';
-    } else {
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer, useSystemFonts: true }).promise;
-      let fullText = '';
-      for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item) => item.str).join(' ');
-        fullText += pageText + '\n';
-      }
-      if (!fullText.trim()) {
-        throw new Error('No readable text found in PDF. Please use a text-based PDF or DOCX file.');
-      }
-      return fullText;
-    }
+  // Extract text from File (PDF, DOCX, TXT)
+  const extractTextFromUploadedFile = async (fileObj) => {
+    return await extractTextFromFile(fileObj);
   };
 
   // Upload new resume to Supabase Storage & DB
@@ -482,12 +317,12 @@ const ATSChecker = () => {
   // Extract text from existing saved resume
   const extractTextFromSavedResume = async (resumeRecord) => {
     if (resumeRecord.fileObj) {
-      return await extractTextFromFile(resumeRecord.fileObj);
+      return await extractTextFromUploadedFile(resumeRecord.fileObj);
     }
 
     const { data, error } = await supabase.storage
       .from(BUCKET_NAME)
-      .createSignedUrl(resumeRecord.file_path, 60);
+      .createSignedUrl(resumeRecord.file_path, 90);
 
     if (error || !data?.signedUrl) {
       throw new Error('Failed to fetch resume file from storage.');
@@ -496,12 +331,12 @@ const ATSChecker = () => {
     const response = await fetch(data.signedUrl);
     const blob = await response.blob();
     const fileObj = new File([blob], resumeRecord.file_name || resumeRecord.resume_name, { type: blob.type });
-    return await extractTextFromFile(fileObj);
+    return await extractTextFromUploadedFile(fileObj);
   };
 
-  // ISSUE 1 FIX: 👁 Eye Icon Preview Resume Action (NEVER triggers ATS analysis)
+  // Eye Icon Preview Resume Action
   const handlePreviewResume = async (resume, e) => {
-    if (e) e.stopPropagation(); // MUST NOT trigger selection or analysis
+    if (e) e.stopPropagation();
 
     setPreviewFileName(resume.resume_name);
     setPreviewFileType(resume.file_type || '');
@@ -514,7 +349,7 @@ const ATSChecker = () => {
         .createSignedUrl(resume.file_path, 300);
 
       if (error || !data?.signedUrl) {
-        throw new Error('Failed to generate preview URL from Supabase storage');
+        throw new Error('Failed to generate preview URL from storage');
       }
 
       setPreviewUrl(data.signedUrl);
@@ -527,12 +362,12 @@ const ATSChecker = () => {
     }
   };
 
-  // Run ATS Analysis once (or reanalyze if forced)
+  // Run ATS v2 Analysis
   const runAnalysis = async (targetResume, forceReanalyze = false) => {
     if (!targetResume) return;
 
-    // Check if analysis already exists in Supabase DB / Cache
-    if (!forceReanalyze) {
+    // Check if analysis already exists in DB / Cache (unless forced or new JD provided)
+    if (!forceReanalyze && !jobDescriptionText.trim()) {
       const stored = await getStoredAnalysisFromDB(targetResume.id);
       if (stored) {
         setSelectedResume(targetResume);
@@ -541,91 +376,113 @@ const ATSChecker = () => {
       }
     }
 
-    // Otherwise generate analysis
     setIsAnalyzing(true);
-    setAnalysisProgress(25);
+    setAnalysisProgress(15);
+    setAnalysisStatusText('Extracting readable text from document...');
 
     try {
-      setAnalysisProgress(55);
       const extractedText = await extractTextFromSavedResume(targetResume);
 
-      setAnalysisProgress(75);
-      const aiResponse = await analyzeResumeATS(
-        extractedText,
-        targetResume.resume_name,
-        targetRole || targetResume.target_role
-      );
+      setAnalysisProgress(35);
+      setAnalysisStatusText('Segmenting sections & analyzing job requirements...');
 
-      const localReport = generateReportCard(
-        extractedText,
-        targetResume.resume_name,
-        targetRole || targetResume.target_role
-      );
+      setAnalysisProgress(60);
+      setAnalysisStatusText('Executing deterministic skill matching engine...');
 
-      const report = {
-        ...localReport,
-        ...aiResponse,
-        atsScore: aiResponse.atsScore || localReport.atsScore,
-      };
+      // Execute ATS v2 Analysis Engine
+      const v2Report = await runAtsAnalysis({
+        resumeText: extractedText,
+        resumeName: targetResume.resume_name,
+        jobDescriptionText: jobDescriptionText.trim(),
+        targetRole: targetRole || targetResume.target_role,
+        serverAiCaller: callServerAi,
+      });
+
+      setAnalysisProgress(90);
+      setAnalysisStatusText('Finalizing confidence diagnostics & scoring breakdown...');
 
       setAnalysisProgress(100);
       setSelectedResume(targetResume);
-      setCurrentAnalysis(report);
+      setCurrentAnalysis(v2Report);
 
       // Save report to Supabase DB & local cache
-      await saveStoredAnalysisToDB(targetResume.id, targetResume.resume_name, targetRole || targetResume.target_role, report);
+      await saveStoredAnalysisToDB(
+        targetResume.id,
+        targetResume.resume_name,
+        targetRole || targetResume.target_role,
+        v2Report
+      );
       loadHistoryFromDB();
 
-      message.success('Resume Analysis Complete & Saved!');
+      message.success('ATS v2 Evaluation Complete!');
     } catch (err) {
-      console.error('Analysis error:', err);
-      message.error(err.message || 'Failed to analyze resume text.');
+      console.error('ATS Analysis error:', err);
+      if (err instanceof UnreadableResumeError) {
+        setUnreadableErrorModal(err.message);
+      } else {
+        message.error(err.message || 'Failed to analyze resume text.');
+      }
     } finally {
       setIsAnalyzing(false);
       setAnalysisProgress(0);
+      setAnalysisStatusText('');
     }
   };
 
-  // ISSUE 3 & 5 FIX: View ATS Analysis (Reuses existing analysis from Supabase DB)
+  // View or Analyze Resume Card Action
   const handleViewOrAnalyzeResume = async (resume, e) => {
     if (e) e.stopPropagation();
     setSelectedResume(resume);
 
-    // Check Supabase DB / Cache for existing analysis
+    // If user provided a JD, always analyze fresh against this JD
+    if (jobDescriptionText.trim()) {
+      runAnalysis(resume, true);
+      return;
+    }
+
     const stored = await getStoredAnalysisFromDB(resume.id);
     if (stored) {
-      // Reuses existing report with ZERO AI calls and ZERO loading animation!
       setCurrentAnalysis(stored);
     } else {
       runAnalysis(resume, false);
     }
   };
 
-  // Clear selection when user clicks anywhere outside a resume card
+  // Clear selection when user clicks outside
   useEffect(() => {
     const handleOutsideClick = (e) => {
-      if (!e.target.closest('.resume-card')) {
-        setSelectedResume(null);
+      if (!e.target.closest('.resume-card') && !e.target.closest('.ats-control-bar')) {
+        // preserve selection
       }
     };
     document.addEventListener('click', handleOutsideClick, true);
     return () => document.removeEventListener('click', handleOutsideClick, true);
   }, []);
 
-  // Card Selection Toggle Logic (Selects card, transfers selection, or deselects if clicked again)
   const handleCardSelectionToggle = (resume, e) => {
     if (e) e.stopPropagation();
     setSelectedResume((prev) => (prev?.id === resume.id ? null : resume));
   };
 
-  // Re-analyze explicit trigger
   const handleExplicitReanalyze = () => {
     if (selectedResume) {
       runAnalysis(selectedResume, true);
     }
   };
 
-  // Real-time filter resumes
+  const handleJdFileUpload = async (fileObj) => {
+    try {
+      const text = await extractTextFromFile(fileObj);
+      if (text) {
+        setJobDescriptionText(text);
+        message.success('Job description file imported successfully!');
+      }
+    } catch (err) {
+      message.error('Failed to read JD file: ' + err.message);
+    }
+    return false; // prevent default upload
+  };
+
   const filteredResumes = resumes.filter((r) => {
     const q = searchQuery.toLowerCase().trim();
     if (!q) return true;
@@ -635,7 +492,6 @@ const ATSChecker = () => {
     return name.includes(q) || fileName.includes(q) || role.includes(q);
   });
 
-  // Drag & Drop handlers
   const handleDropOnUploadCard = (e) => {
     e.preventDefault();
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
@@ -660,6 +516,13 @@ const ATSChecker = () => {
     }
   };
 
+  // Helper for confidence badge colors
+  const getConfidenceBadgeColor = (level) => {
+    if (level === 'High') return '#10b981';
+    if (level === 'Medium') return '#f59e0b';
+    return '#ef4444';
+  };
+
   return (
     <div style={{ padding: '0 20px', maxWidth: '1400px', margin: '0 auto' }}>
       {/* Top Header */}
@@ -668,25 +531,30 @@ const ATSChecker = () => {
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
-          marginBottom: 32,
+          marginBottom: 24,
           flexWrap: 'wrap',
           gap: 16,
         }}
       >
         <div>
-          <h1
-            style={{
-              fontSize: 28,
-              fontWeight: 700,
-              color: COLORS.textPrimary,
-              margin: 0,
-              letterSpacing: '-0.5px',
-            }}
-          >
-            Resume Analyzer
-          </h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <h1
+              style={{
+                fontSize: 28,
+                fontWeight: 700,
+                color: COLORS.textPrimary,
+                margin: 0,
+                letterSpacing: '-0.5px',
+              }}
+            >
+              ATS Match Engine
+            </h1>
+            <Tag color="cyan" style={{ fontSize: 12, fontWeight: 700, borderRadius: 6, margin: 0 }}>
+              ATS v2 Engine
+            </Tag>
+          </div>
           <p style={{ color: COLORS.textSecondary, margin: '4px 0 0 0', fontSize: 14 }}>
-            Manage and evaluate your resumes with professional ATS diagnostics
+            Deterministic Resume-to-Job Description matching with verifiable evidence
           </p>
         </div>
 
@@ -703,11 +571,7 @@ const ATSChecker = () => {
           items={[
             {
               key: 'analyzer',
-              label: (
-                <span>
-                  Analyzer
-                </span>
-              ),
+              label: <span>ATS Analyzer</span>,
             },
             {
               key: 'history',
@@ -722,7 +586,7 @@ const ATSChecker = () => {
       </div>
 
       {activeTab === 'history' ? (
-        /* HISTORY TAB (ISSUE 5 FIX: Reads directly from Supabase DB without triggering new analysis) */
+        /* HISTORY TAB */
         <div>
           {historyReportView ? (
             /* EMBEDDED REPORT VIEWER INSIDE HISTORY TAB */
@@ -737,111 +601,15 @@ const ATSChecker = () => {
                 </Button>
               </div>
 
-              {/* REPORT CARD HERO BANNER */}
-              <Card
-                style={{
-                  borderRadius: 20,
-                  background: 'linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #1e293b 100%)',
-                  color: 'white',
-                  marginBottom: 24,
-                  boxShadow: '0 8px 32px rgba(15, 23, 42, 0.2)',
-                }}
-                styles={{ body: { padding: '32px 28px' } }}
-              >
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 32, alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ flex: 1, minWidth: '280px' }}>
-                    <Tag color="purple-inverse" style={{ fontSize: 12, borderRadius: 6, marginBottom: 8 }}>
-                      STORED ATS REPORT CARD
-                    </Tag>
-                    <h2 style={{ color: 'white', fontSize: 26, fontWeight: 700, margin: '0 0 6px 0' }}>
-                      {historyReportView.resumeName || 'Candidate Resume'}
-                    </h2>
-                    <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 14, margin: 0 }}>
-                      Target Role: <strong style={{ color: '#bd7efe' }}>{historyReportView.targetRole}</strong>
-                    </p>
-                    <div style={{ marginTop: 16, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                      <Badge count={`Hiring Odds: ${historyReportView.report.hiringProbability}`} style={{ backgroundColor: '#10b981' }} />
-                      <Badge count={`CGPA: ${historyReportView.report.cgpa}`} style={{ backgroundColor: '#6366f1' }} />
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <div style={{ textAlign: 'center' }}>
-                      <Progress
-                        type="circle"
-                        percent={historyReportView.report.atsScore}
-                        width={110}
-                        strokeColor={{ '0%': '#bd7efe', '100%': '#10b981' }}
-                        trailColor="rgba(255,255,255,0.1)"
-                        format={(percent) => <span style={{ color: 'white', fontSize: 22, fontWeight: 700 }}>{percent}%</span>}
-                      />
-                      <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 8 }}>Overall ATS Score</div>
-                    </div>
-
-                    <div
-                      style={{
-                        background: 'rgba(255,255,255,0.08)',
-                        backdropFilter: 'blur(10px)',
-                        border: '1px solid rgba(255,255,255,0.15)',
-                        borderRadius: 16,
-                        padding: '20px 28px',
-                        textAlign: 'center',
-                        minWidth: '120px',
-                      }}
-                    >
-                      <div style={{ color: '#bd7efe', fontSize: 42, fontWeight: 800, lineHeight: 1 }}>
-                        {historyReportView.report.grade}
-                      </div>
-                      <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 6 }}>Resume Grade</div>
-                    </div>
-                  </div>
-                </div>
-              </Card>
-
-              {/* RECRUITER ASSESSMENT */}
-              <Card style={{ borderRadius: 16, borderLeft: `5px solid ${COLORS.primary}`, backgroundColor: '#fafafa', marginBottom: 24 }}>
-                <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-                  <SolutionOutlined style={{ fontSize: 28, color: COLORS.primary, marginTop: 2 }} />
-                  <div>
-                    <h4 style={{ margin: '0 0 6px 0', fontSize: 16, fontWeight: 600, color: COLORS.textPrimary }}>
-                      Senior Recruiter Assessment
-                    </h4>
-                    <p style={{ margin: 0, fontSize: 14, color: COLORS.textSecondary, lineHeight: 1.6 }}>
-                      "{historyReportView.report.recruiterFeedback}"
-                    </p>
-                  </div>
-                </div>
-              </Card>
-
-              {/* 15 CATEGORY ASSESSMENT */}
-              <Card title={<span style={{ fontSize: 18, fontWeight: 600 }}>Detailed Section Scores</span>} style={{ borderRadius: 16, marginBottom: 24 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 20 }}>
-                  {historyReportView.report.categories.map((cat, idx) => (
-                    <div key={idx} style={{ padding: 16, borderRadius: 12, background: COLORS.bgLight, border: `1px solid ${COLORS.borderLight}` }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                        <span style={{ fontWeight: 600, color: COLORS.textPrimary, fontSize: 14 }}>{cat.name}</span>
-                        <span style={{ fontWeight: 700, color: COLORS.primaryDark, fontSize: 14 }}>
-                          {cat.score} / 10 ({cat.percentage}%)
-                        </span>
-                      </div>
-                      <Progress
-                        percent={cat.percentage}
-                        showInfo={false}
-                        strokeColor={cat.percentage >= 80 ? COLORS.green : cat.percentage >= 65 ? COLORS.primary : COLORS.amber}
-                        style={{ marginBottom: 8 }}
-                      />
-                      <p style={{ margin: 0, fontSize: 12, color: COLORS.textSecondary, lineHeight: 1.4 }}>{cat.explanation}</p>
-                    </div>
-                  ))}
-                </div>
-              </Card>
+              {/* RENDER REPORT DETAILS */}
+              {renderFullReportCard(historyReportView.report, historyReportView.resumeName, historyReportView.targetRole)}
             </div>
           ) : historyList.length === 0 ? (
             <Card style={{ borderRadius: 16, textAlign: 'center', padding: '60px 20px' }}>
               <HistoryOutlined style={{ fontSize: 48, color: COLORS.textLight, marginBottom: 16 }} />
               <h3 style={{ color: COLORS.textPrimary, fontSize: 18, fontWeight: 600 }}>No Analysis History</h3>
               <p style={{ color: COLORS.textSecondary, fontSize: 14 }}>
-                Select a resume card to generate your first ATS report card.
+                Select a resume card to generate your first ATS v2 report card.
               </p>
               <Button
                 type="primary"
@@ -881,9 +649,18 @@ const ATSChecker = () => {
                         </Tag>
                       )}
                     </div>
-                    <Tag color="purple-inverse" style={{ fontSize: 14, fontWeight: 700 }}>
-                      {item.grade} ({item.atsScore}%)
-                    </Tag>
+                    <div style={{ textAlign: 'right' }}>
+                      <Tag color="purple-inverse" style={{ fontSize: 14, fontWeight: 700, margin: 0 }}>
+                        {item.grade} ({item.atsScore}%)
+                      </Tag>
+                      {item.report?.isV2 && (
+                        <div style={{ marginTop: 4 }}>
+                          <Tag color="cyan" style={{ fontSize: 10, borderRadius: 4, margin: 0 }}>
+                            ATS v2
+                          </Tag>
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <Divider style={{ margin: '12px 0' }} />
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: COLORS.textLight }}>
@@ -896,7 +673,7 @@ const ATSChecker = () => {
           )}
         </div>
       ) : currentAnalysis ? (
-        /* DETAILED REPORT CARD VIEW (MAIN ANALYZER) */
+        /* DETAILED REPORT VIEW (ATS v2 MAIN ANALYZER) */
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
             <Button icon={<ArrowLeftOutlined />} onClick={() => setCurrentAnalysis(null)} style={{ borderRadius: 12 }}>
@@ -908,205 +685,178 @@ const ATSChecker = () => {
                 onClick={handleExplicitReanalyze}
                 style={{ borderRadius: 12, border: `1px solid ${COLORS.border}` }}
               >
-                Reanalyze Resume
+                Reanalyze with Current Settings
               </Button>
               <Button
                 type="primary"
                 icon={<TrophyOutlined />}
                 style={{ borderRadius: 12, background: COLORS.primary, border: 'none' }}
               >
-                Saved in Supabase
+                Saved in Database
               </Button>
             </div>
           </div>
 
-          {/* REPORT CARD HERO BANNER */}
-          <Card
-            style={{
-              borderRadius: 20,
-              background: 'linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #1e293b 100%)',
-              color: 'white',
-              marginBottom: 24,
-              boxShadow: '0 8px 32px rgba(15, 23, 42, 0.2)',
-            }}
-            styles={{ body: { padding: '32px 28px' } }}
-          >
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 32, alignItems: 'center', justifyContent: 'space-between' }}>
-              <div style={{ flex: 1, minWidth: '280px' }}>
-                <Tag color="purple-inverse" style={{ fontSize: 12, borderRadius: 6, marginBottom: 8 }}>
-                  OFFICIAL ATS REPORT CARD
-                </Tag>
-                <h2 style={{ color: 'white', fontSize: 26, fontWeight: 700, margin: '0 0 6px 0' }}>
-                  {selectedResume?.resume_name || 'Candidate Resume'}
-                </h2>
-                <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: 14, margin: 0 }}>
-                  Target Role: <strong style={{ color: '#bd7efe' }}>{targetRole || selectedResume?.target_role || 'General Role'}</strong>
-                </p>
-                <div style={{ marginTop: 16, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                  <Badge count={`Hiring Odds: ${currentAnalysis.hiringProbability}`} style={{ backgroundColor: '#10b981' }} />
-                  <Badge count={`CGPA: ${currentAnalysis.cgpa}`} style={{ backgroundColor: '#6366f1' }} />
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
-                <div style={{ textAlign: 'center' }}>
-                  <Progress
-                    type="circle"
-                    percent={currentAnalysis.atsScore}
-                    width={110}
-                    strokeColor={{ '0%': '#bd7efe', '100%': '#10b981' }}
-                    trailColor="rgba(255,255,255,0.1)"
-                    format={(percent) => <span style={{ color: 'white', fontSize: 22, fontWeight: 700 }}>{percent}%</span>}
-                  />
-                  <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 8 }}>Overall ATS Score</div>
-                </div>
-
-                <div
-                  style={{
-                    background: 'rgba(255,255,255,0.08)',
-                    backdropFilter: 'blur(10px)',
-                    border: '1px solid rgba(255,255,255,0.15)',
-                    borderRadius: 16,
-                    padding: '20px 28px',
-                    textAlign: 'center',
-                    minWidth: '120px',
-                  }}
-                >
-                  <div style={{ color: '#bd7efe', fontSize: 42, fontWeight: 800, lineHeight: 1 }}>
-                    {currentAnalysis.grade}
-                  </div>
-                  <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 6 }}>Resume Grade</div>
-                </div>
-              </div>
-            </div>
-          </Card>
-
-          {/* RECRUITER ASSESSMENT */}
-          <Card style={{ borderRadius: 16, borderLeft: `5px solid ${COLORS.primary}`, backgroundColor: '#fafafa', marginBottom: 24 }}>
-            <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-              <SolutionOutlined style={{ fontSize: 28, color: COLORS.primary, marginTop: 2 }} />
-              <div>
-                <h4 style={{ margin: '0 0 6px 0', fontSize: 16, fontWeight: 600, color: COLORS.textPrimary }}>
-                  Senior Recruiter Assessment
-                </h4>
-                <p style={{ margin: 0, fontSize: 14, color: COLORS.textSecondary, lineHeight: 1.6 }}>
-                  "{currentAnalysis.recruiterFeedback}"
-                </p>
-              </div>
-            </div>
-          </Card>
-
-          {/* 15 CATEGORY ASSESSMENT */}
-          <Card title={<span style={{ fontSize: 18, fontWeight: 600 }}>Detailed Section Scores</span>} style={{ borderRadius: 16, marginBottom: 24 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 20 }}>
-              {currentAnalysis.categories.map((cat, idx) => (
-                <div key={idx} style={{ padding: 16, borderRadius: 12, background: COLORS.bgLight, border: `1px solid ${COLORS.borderLight}` }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                    <span style={{ fontWeight: 600, color: COLORS.textPrimary, fontSize: 14 }}>{cat.name}</span>
-                    <span style={{ fontWeight: 700, color: COLORS.primaryDark, fontSize: 14 }}>
-                      {cat.score} / 10 ({cat.percentage}%)
-                    </span>
-                  </div>
-                  <Progress
-                    percent={cat.percentage}
-                    showInfo={false}
-                    strokeColor={cat.percentage >= 80 ? COLORS.green : cat.percentage >= 65 ? COLORS.primary : COLORS.amber}
-                    style={{ marginBottom: 8 }}
-                  />
-                  <p style={{ margin: 0, fontSize: 12, color: COLORS.textSecondary, lineHeight: 1.4 }}>{cat.explanation}</p>
-                </div>
-              ))}
-            </div>
-          </Card>
-
-          {/* STRENGTHS & WEAKNESSES */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 20, marginBottom: 24 }}>
-            <Card title={<span style={{ color: COLORS.green, fontSize: 16, fontWeight: 600 }}><CheckCircleOutlined style={{ marginRight: 8 }} /> Top Strengths</span>} style={{ borderRadius: 16 }}>
-              <ul style={{ paddingLeft: 20, margin: 0 }}>
-                {currentAnalysis.strengths.map((item, i) => (
-                  <li key={i} style={{ marginBottom: 10, fontSize: 14, color: COLORS.textPrimary }}>{item}</li>
-                ))}
-              </ul>
-            </Card>
-
-            <Card title={<span style={{ color: COLORS.red, fontSize: 16, fontWeight: 600 }}><CloseCircleOutlined style={{ marginRight: 8 }} /> Areas to Improve</span>} style={{ borderRadius: 16 }}>
-              <ul style={{ paddingLeft: 20, margin: 0 }}>
-                {currentAnalysis.weaknesses.map((item, i) => (
-                  <li key={i} style={{ marginBottom: 10, fontSize: 14, color: COLORS.textPrimary }}>{item}</li>
-                ))}
-              </ul>
-            </Card>
-          </div>
-
-          {/* AI SUGGESTIONS */}
-          <Card title={<span style={{ fontSize: 18, fontWeight: 600 }}><BulbOutlined style={{ color: COLORS.amber }} /> Personalized AI Recommendations</span>} style={{ borderRadius: 16 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {currentAnalysis.aiSuggestions.map((sug, i) => (
-                <div key={i} style={{ padding: 14, borderRadius: 10, background: COLORS.primaryLight, color: COLORS.textPrimary, fontSize: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <StarOutlined style={{ color: COLORS.primary, fontSize: 18 }} />
-                  <span>{sug}</span>
-                </div>
-              ))}
-            </div>
-          </Card>
+          {renderFullReportCard(currentAnalysis, selectedResume?.resume_name, targetRole || selectedResume?.target_role)}
         </div>
       ) : (
-        /* MAIN RESUME SELECTION GRID VIEW */
+        /* MAIN RESUME SELECTION & JD CONTROL PANEL */
         <div>
           {isAnalyzing ? (
             <Card style={{ borderRadius: 16, textAlign: 'center', padding: '60px 20px', marginBottom: 24 }}>
               <Spin size="large" />
               <h3 style={{ marginTop: 20, color: COLORS.textPrimary, fontSize: 18, fontWeight: 600 }}>
-                Analyzing Resume Content...
+                {analysisStatusText || 'Evaluating Resume against Job Description...'}
               </h3>
-              <div style={{ maxWidth: 360, margin: '16px auto 0 auto' }}>
+              <div style={{ maxWidth: 380, margin: '16px auto 0 auto' }}>
                 <Progress percent={analysisProgress} strokeColor={COLORS.primary} />
               </div>
             </Card>
           ) : (
             <div>
-              {/* CONTROL BAR: SEARCH & TARGET ROLE & ANALYZE BUTTON */}
-              <div style={{ marginBottom: 24, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-                <Input
-                  placeholder="Search by resume name or file name..."
-                  prefix={<SearchOutlined style={{ color: COLORS.textLight }} />}
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  allowClear
-                  size="large"
-                  style={{ borderRadius: 12, flex: 1, minWidth: 260 }}
-                />
+              {/* ATS v2 CONTROL PANEL: JOB DESCRIPTION & ROLE & SEARCH */}
+              <Card
+                className="ats-control-bar"
+                style={{
+                  borderRadius: 16,
+                  marginBottom: 24,
+                  border: `1px solid ${COLORS.border}`,
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+                }}
+                styles={{ body: { padding: 20 } }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 12 }}>
+                  <div>
+                    <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: COLORS.textPrimary }}>
+                      Target Job Description & Role
+                    </h3>
+                    <p style={{ margin: '2px 0 0 0', fontSize: 13, color: COLORS.textSecondary }}>
+                      Provide the target job description to match your resume deterministically against role-specific requirements.
+                    </p>
+                  </div>
 
-                <Input
-                  placeholder="Target Role (e.g. Software Engineer)"
-                  value={targetRole}
-                  onChange={(e) => setTargetRole(e.target.value)}
-                  size="large"
-                  style={{ borderRadius: 12, width: 240 }}
-                />
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <Button
+                      size="small"
+                      icon={<FileTextOutlined />}
+                      onClick={() => setShowJdInput((prev) => !prev)}
+                      style={{ borderRadius: 8, fontWeight: 600 }}
+                    >
+                      {showJdInput ? 'Hide JD Box' : jobDescriptionText ? 'Edit Stored JD' : 'Paste Job Description'}
+                    </Button>
+                    <Button
+                      size="small"
+                      icon={<UploadOutlined />}
+                      onClick={() => jdFileInputRef.current?.click()}
+                      style={{ borderRadius: 8 }}
+                    >
+                      Import JD File
+                    </Button>
+                    <input
+                      type="file"
+                      ref={jdFileInputRef}
+                      style={{ display: 'none' }}
+                      accept=".txt,.pdf,.docx"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files[0]) {
+                          handleJdFileUpload(e.target.files[0]);
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
 
-                <Button
-                  type="primary"
-                  size="large"
-                  icon={<TrophyOutlined />}
-                  disabled={!selectedResume}
-                  onClick={() => handleViewOrAnalyzeResume(selectedResume)}
-                  style={{
-                    height: 44,
-                    borderRadius: 12,
-                    fontSize: 15,
-                    fontWeight: 600,
-                    background: COLORS.primary,
-                    border: 'none',
-                    boxShadow: COLORS.shadow,
-                    padding: '0 28px',
-                  }}
-                >
-                  Analyze Selected Resume
-                </Button>
-              </div>
+                {/* Collapsible / Expandable Job Description Input */}
+                {showJdInput && (
+                  <div style={{ marginBottom: 16 }}>
+                    <TextArea
+                      rows={5}
+                      placeholder="Paste the full job description text here (e.g. required skills, qualifications, responsibilities)..."
+                      value={jobDescriptionText}
+                      onChange={(e) => setJobDescriptionText(e.target.value)}
+                      style={{ borderRadius: 10, fontSize: 13 }}
+                    />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 12, color: COLORS.textLight }}>
+                      <span>
+                        {jobDescriptionText ? `${jobDescriptionText.split(/\s+/).filter(Boolean).length} words loaded` : 'No JD loaded yet'}
+                      </span>
+                      {jobDescriptionText && (
+                        <Button type="link" size="small" onClick={() => setJobDescriptionText('')} style={{ padding: 0 }}>
+                          Clear JD
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                )}
 
-              {/* RESUME GRID */}
+                {/* Active JD status banner if JD is loaded but box is closed */}
+                {!showJdInput && jobDescriptionText && (
+                  <Alert
+                    type="success"
+                    showIcon
+                    message={
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span>
+                          <strong>Target Job Description Active:</strong> {jobDescriptionText.substring(0, 100)}...
+                        </span>
+                        <Button type="link" size="small" onClick={() => setShowJdInput(true)}>
+                          View / Edit
+                        </Button>
+                      </div>
+                    }
+                    style={{ marginBottom: 16, borderRadius: 10 }}
+                  />
+                )}
+
+                {!jobDescriptionText && !showJdInput && (
+                  <div style={{ padding: '8px 12px', background: COLORS.bgLight, borderRadius: 8, marginBottom: 16, fontSize: 12, color: COLORS.textSecondary }}>
+                    <InfoCircleOutlined style={{ marginRight: 6, color: COLORS.primary }} />
+                    <em>Tip: Providing a Job Description activates exact ATS v2 skill matching, traceable evidence, and gap scoring. Without a JD, a general role baseline will be used.</em>
+                  </div>
+                )}
+
+                {/* CONTROLS: SEARCH & TARGET ROLE & ANALYZE BUTTON */}
+                <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Input
+                    placeholder="Search by resume name..."
+                    prefix={<SearchOutlined style={{ color: COLORS.textLight }} />}
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    allowClear
+                    size="large"
+                    style={{ borderRadius: 10, flex: 1, minWidth: 240 }}
+                  />
+
+                  <Input
+                    placeholder="Target Role (e.g. Frontend Engineer)"
+                    value={targetRole}
+                    onChange={(e) => setTargetRole(e.target.value)}
+                    size="large"
+                    style={{ borderRadius: 10, width: 230 }}
+                  />
+
+                  <Button
+                    type="primary"
+                    size="large"
+                    icon={<ThunderboltOutlined />}
+                    disabled={!selectedResume}
+                    onClick={() => handleViewOrAnalyzeResume(selectedResume)}
+                    style={{
+                      height: 42,
+                      borderRadius: 10,
+                      fontSize: 14,
+                      fontWeight: 600,
+                      background: COLORS.primary,
+                      border: 'none',
+                      padding: '0 24px',
+                    }}
+                  >
+                    Evaluate Selected Resume
+                  </Button>
+                </div>
+              </Card>
+
+              {/* RESUME SELECTION GRID */}
               {resumesLoading ? (
                 <div style={{ display: 'flex', justifyContent: 'center', padding: 60 }}>
                   <Spin size="large" tip="Loading resumes..." />
@@ -1121,7 +871,7 @@ const ATSChecker = () => {
                     gap: 20,
                   }}
                 >
-                  {/* 1. UPLOAD NEW RESUME CARD (Exact match to MyResumes Upload Card) */}
+                  {/* UPLOAD NEW RESUME CARD */}
                   <Card
                     hoverable
                     style={{
@@ -1163,8 +913,8 @@ const ATSChecker = () => {
 
                     <div
                       style={{
-                        width: 56,
-                        height: 56,
+                        width: 52,
+                        height: 52,
                         borderRadius: '50%',
                         background: `linear-gradient(135deg, ${COLORS.primaryLight} 0%, ${COLORS.secondaryLight} 100%)`,
                         display: 'flex',
@@ -1173,11 +923,11 @@ const ATSChecker = () => {
                         marginBottom: 12,
                       }}
                     >
-                      <UploadOutlined style={{ fontSize: 24, color: COLORS.secondary }} />
+                      <UploadOutlined style={{ fontSize: 22, color: COLORS.secondary }} />
                     </div>
                     <h3
                       style={{
-                        fontSize: 16,
+                        fontSize: 15,
                         fontWeight: 600,
                         color: COLORS.textPrimary,
                         margin: '0 0 4px 0',
@@ -1187,7 +937,7 @@ const ATSChecker = () => {
                     </h3>
                     <p
                       style={{
-                        fontSize: 13,
+                        fontSize: 12,
                         color: COLORS.textLight,
                         margin: 0,
                         textAlign: 'center',
@@ -1197,7 +947,7 @@ const ATSChecker = () => {
                     </p>
                   </Card>
 
-                  {/* 2. EXISTING RESUME CARDS (ISSUE 4 FIX: Clean toggle selection & TWO action buttons) */}
+                  {/* EXISTING RESUME CARDS */}
                   {filteredResumes.map((resume) => {
                     const isSelected = selectedResume?.id === resume.id;
 
@@ -1210,8 +960,8 @@ const ATSChecker = () => {
                         draggable
                         onDragStart={(e, res) => handleDragStartCard(e, res)}
                         actions={
-                          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                            <Tooltip title="Preview Original Uploaded File (Eye)">
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                            <Tooltip title="Preview Original File (Eye)">
                               <Button
                                 type="text"
                                 icon={<EyeOutlined style={{ fontSize: 16 }} />}
@@ -1222,9 +972,8 @@ const ATSChecker = () => {
                             </Tooltip>
 
                             <Button
-                              type={isSelected ? "primary" : "default"}
+                              type={isSelected ? 'primary' : 'default'}
                               size="small"
-
                               onClick={(e) => handleViewOrAnalyzeResume(resume, e)}
                               style={{
                                 borderRadius: 8,
@@ -1234,14 +983,13 @@ const ATSChecker = () => {
                                 border: `1px solid ${isSelected ? COLORS.primary : COLORS.border}`,
                               }}
                             >
-                              View
+                              Evaluate
                             </Button>
                           </div>
                         }
                       />
                     );
                   })}
-
                 </div>
               )}
 
@@ -1256,7 +1004,7 @@ const ATSChecker = () => {
                           No resumes match "{searchQuery}"
                         </p>
                         <p style={{ fontSize: 13, color: COLORS.textLight, margin: 0 }}>
-                          Try searching for a different resume name or file extension.
+                          Try searching for a different resume name or clear the query.
                         </p>
                       </div>
                     }
@@ -1268,7 +1016,34 @@ const ATSChecker = () => {
         </div>
       )}
 
-      {/* ISSUE 1 PREVIEW MODAL FOR 👁 EYE BUTTON */}
+      {/* MODAL: UNREADABLE / SCANNED PDF GUIDANCE */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: COLORS.red }}>
+            <ExclamationCircleOutlined style={{ fontSize: 22 }} />
+            <span>Readable Text Extraction Notice</span>
+          </div>
+        }
+        open={Boolean(unreadableErrorModal)}
+        onCancel={() => setUnreadableErrorModal(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setUnreadableErrorModal(null)}>
+            Understood
+          </Button>,
+        ]}
+      >
+        <p style={{ fontSize: 14, color: COLORS.textPrimary, lineHeight: 1.6 }}>
+          {unreadableErrorModal}
+        </p>
+        <Alert
+          type="info"
+          message="Why did this happen?"
+          description="Standard ATS engines parse text streams inside PDFs. If a PDF was created via physical scanner, smartphone photo, or flattened graphics, text cannot be reliably extracted without OCR. Please re-export your resume directly from Word, Google Docs, or LaTeX as a text-based PDF."
+          style={{ marginTop: 12, borderRadius: 8 }}
+        />
+      </Modal>
+
+      {/* MODAL: FILE PREVIEW (EYE ICON) */}
       <Modal
         title={
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1312,7 +1087,7 @@ const ATSChecker = () => {
             ) : (
               <div style={{ textAlign: 'center', padding: 60 }}>
                 <FileWordOutlined style={{ fontSize: 64, color: '#2B579A', marginBottom: 16 }} />
-                <h3>Word DOCX Document Preview</h3>
+                <h3>Word Document Preview</h3>
                 <p style={{ color: COLORS.textSecondary, marginBottom: 20 }}>
                   Browser native rendering for DOCX files is available via download/open.
                 </p>
@@ -1328,6 +1103,443 @@ const ATSChecker = () => {
       </Modal>
     </div>
   );
+
+  /**
+   * Helper to Render the Complete Report Card (used in both live view & history viewer)
+   */
+  function renderFullReportCard(report, resumeName, role) {
+    if (!report) return null;
+
+    const isV2 = report.isV2 || report.version === '2.0';
+    const confidenceColor = getConfidenceBadgeColor(report.confidence);
+
+    return (
+      <div>
+        {/* REPORT CARD HERO BANNER */}
+        <Card
+          style={{
+            borderRadius: 20,
+            background: 'linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #1e293b 100%)',
+            color: 'white',
+            marginBottom: 24,
+            boxShadow: '0 8px 32px rgba(15, 23, 42, 0.2)',
+          }}
+          styles={{ body: { padding: '32px 28px' } }}
+        >
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 32, alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ flex: 1, minWidth: '280px' }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+                <Tag color="cyan" style={{ fontSize: 12, borderRadius: 6 }}>
+                  {isV2 ? 'ATS v2 DETERMINISTIC MATCH' : 'ATS REPORT CARD'}
+                </Tag>
+                {report.aiAvailability && (
+                  <Tag color="blue" style={{ fontSize: 11, borderRadius: 6 }}>
+                    {report.aiAvailability}
+                  </Tag>
+                )}
+              </div>
+
+              <h2 style={{ color: 'white', fontSize: 26, fontWeight: 700, margin: '0 0 6px 0' }}>
+                {resumeName || 'Candidate Resume'}
+              </h2>
+              <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: 14, margin: 0 }}>
+                Target Role: <strong style={{ color: '#5EEAD4' }}>{report.jobTitle || role || 'General Role'}</strong>
+                {report.seniorityMode && (
+                  <span style={{ marginLeft: 8, textTransform: 'capitalize' }}>
+                    ({report.seniorityMode} Level)
+                  </span>
+                )}
+              </p>
+
+              <div style={{ marginTop: 16, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                <Tooltip title={report.confidenceReasons ? report.confidenceReasons.join(' ') : 'Match confidence evaluated by evidentiary backing'}>
+                  <Badge
+                    count={`Confidence: ${report.confidence || 'Medium'}`}
+                    style={{ backgroundColor: confidenceColor, fontWeight: 600, padding: '0 8px' }}
+                  />
+                </Tooltip>
+                <Badge count={`Hiring Odds: ${report.hiringProbability || 'Medium'}`} style={{ backgroundColor: '#10b981' }} />
+                <Badge count={`CGPA: ${report.cgpa || 'N/A'}`} style={{ backgroundColor: '#6366f1' }} />
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 24, alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ textAlign: 'center' }}>
+                <Progress
+                  type="circle"
+                  percent={report.atsScore}
+                  width={110}
+                  strokeColor={{ '0%': '#5EEAD4', '100%': '#10b981' }}
+                  trailColor="rgba(255,255,255,0.1)"
+                  format={(percent) => <span style={{ color: 'white', fontSize: 22, fontWeight: 700 }}>{percent}%</span>}
+                />
+                <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 8 }}>ATS Match Score</div>
+              </div>
+
+              <div
+                style={{
+                  background: 'rgba(255,255,255,0.08)',
+                  backdropFilter: 'blur(10px)',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  borderRadius: 16,
+                  padding: '20px 28px',
+                  textAlign: 'center',
+                  minWidth: '120px',
+                }}
+              >
+                <div style={{ color: '#5EEAD4', fontSize: 42, fontWeight: 800, lineHeight: 1 }}>
+                  {report.grade}
+                </div>
+                <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 6 }}>Resume Grade</div>
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        {/* MATCH SUMMARY BANNER */}
+        <Card
+          style={{
+            borderRadius: 16,
+            borderLeft: `5px solid ${COLORS.primary}`,
+            backgroundColor: '#fafafa',
+            marginBottom: 24,
+          }}
+        >
+          <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+            <SolutionOutlined style={{ fontSize: 28, color: COLORS.primary, marginTop: 2 }} />
+            <div>
+              <h4 style={{ margin: '0 0 6px 0', fontSize: 16, fontWeight: 600, color: COLORS.textPrimary }}>
+                Match Summary & Assessment
+              </h4>
+              <p style={{ margin: 0, fontSize: 14, color: COLORS.textSecondary, lineHeight: 1.6 }}>
+                {report.matchSummary || report.summary || report.recruiterFeedback}
+              </p>
+            </div>
+          </div>
+        </Card>
+
+        {/* V2 DETAILS OR V1 LEGACY BREAKDOWN TABS */}
+        <Tabs
+          activeKey={reportSubTab}
+          onChange={setReportSubTab}
+          style={{ marginBottom: 24 }}
+          items={[
+            ...(isV2
+              ? [
+                  {
+                    key: 'skills',
+                    label: (
+                      <span>
+                        <ThunderboltOutlined /> Skills Alignment ({report.matchedRequiredSkills?.length || 0} Matched)
+                      </span>
+                    ),
+                    children: renderSkillsAlignmentTab(report),
+                  },
+                  {
+                    key: 'breakdown',
+                    label: (
+                      <span>
+                        <RadarChartOutlined /> Scoring Weights & Breakdown
+                      </span>
+                    ),
+                    children: renderScoringBreakdownTab(report),
+                  },
+                ]
+              : []),
+            {
+              key: 'suggestions',
+              label: (
+                <span>
+                  <BulbOutlined /> Actionable Improvements ({report.improvementSuggestions?.length || report.aiSuggestions?.length || 0})
+                </span>
+              ),
+              children: renderSuggestionsTab(report),
+            },
+            ...(report.categories
+              ? [
+                  {
+                    key: 'categories',
+                    label: (
+                      <span>
+                        <FileTextOutlined /> Section Scores ({report.categories.length})
+                      </span>
+                    ),
+                    children: renderLegacyCategoriesTab(report),
+                  },
+                ]
+              : []),
+          ]}
+        />
+      </div>
+    );
+  }
+
+  /**
+   * Tab 1: Skills Alignment with Traceable Evidence & Badges
+   */
+  function renderSkillsAlignmentTab(report) {
+    const matchedRequired = report.matchedRequiredSkills || [];
+    const missingRequired = report.missingRequiredSkills || [];
+    const matchedPreferred = report.matchedPreferredSkills || [];
+    const missingPreferred = report.missingPreferredSkills || [];
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {/* MATCHED REQUIRED SKILLS */}
+        <Card
+          title={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <CheckCircleOutlined style={{ color: COLORS.green, fontSize: 18 }} />
+              <span style={{ fontSize: 16, fontWeight: 600 }}>Matched Required Skills ({matchedRequired.length})</span>
+            </div>
+          }
+          style={{ borderRadius: 16 }}
+        >
+          {matchedRequired.length === 0 ? (
+            <p style={{ color: COLORS.textLight, margin: 0 }}>No explicit required skills matched yet.</p>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: 14 }}>
+              {matchedRequired.map((skill, i) => (
+                <div
+                  key={i}
+                  style={{
+                    padding: 14,
+                    borderRadius: 12,
+                    background: COLORS.bgLight,
+                    border: `1px solid ${COLORS.borderLight}`,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
+                    <span style={{ fontWeight: 700, fontSize: 15, color: COLORS.textPrimary }}>
+                      {skill.canonicalName}
+                    </span>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <Tag color={skill.isDemonstrated ? 'green' : 'blue'} style={{ fontSize: 11, borderRadius: 4, margin: 0 }}>
+                        {skill.section ? `In ${skill.section}` : 'Matched'}
+                      </Tag>
+                      <Tag color={skill.matchType === 'exact' ? 'cyan' : skill.matchType === 'equivalent' ? 'purple' : 'gold'} style={{ fontSize: 11, borderRadius: 4, margin: 0 }}>
+                        {skill.matchType}
+                      </Tag>
+                    </div>
+                  </div>
+
+                  {skill.evidence ? (
+                    <div style={{ fontSize: 12, color: COLORS.textSecondary, fontStyle: 'italic', background: '#ffffff', padding: '6px 10px', borderRadius: 6, border: '1px solid #f0f0f0' }}>
+                      "{skill.evidence}"
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: COLORS.textLight }}>Found in {skill.section || 'resume text'}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        {/* MISSING REQUIRED SKILLS */}
+        <Card
+          title={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <CloseCircleOutlined style={{ color: COLORS.red, fontSize: 18 }} />
+              <span style={{ fontSize: 16, fontWeight: 600, color: COLORS.red }}>
+                Missing Required Skills ({missingRequired.length})
+              </span>
+            </div>
+          }
+          style={{ borderRadius: 16 }}
+        >
+          {missingRequired.length === 0 ? (
+            <Alert type="success" message="All required technical skills from the job description are matched in candidate resume!" showIcon />
+          ) : (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+              {missingRequired.map((skill, i) => (
+                <Tag
+                  key={i}
+                  color="red"
+                  style={{
+                    fontSize: 13,
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <CloseOutlined /> {skill.requirement || skill.canonicalName}
+                </Tag>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        {/* PREFERRED SKILLS (BONUS) */}
+        {(matchedPreferred.length > 0 || missingPreferred.length > 0) && (
+          <Card
+            title={<span style={{ fontSize: 16, fontWeight: 600 }}>Preferred / Nice-to-Have Skills</span>}
+            style={{ borderRadius: 16 }}
+          >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {matchedPreferred.length > 0 && (
+                <div>
+                  <h5 style={{ margin: '0 0 8px 0', color: COLORS.green, fontSize: 13 }}>Matched Preferred Skills:</h5>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {matchedPreferred.map((s, i) => (
+                      <Tag key={i} color="green" style={{ borderRadius: 6, fontSize: 13, padding: '4px 10px' }}>
+                        <CheckOutlined /> {s.canonicalName}
+                      </Tag>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {missingPreferred.length > 0 && (
+                <div>
+                  <h5 style={{ margin: '8px 0 8px 0', color: COLORS.textSecondary, fontSize: 13 }}>Missing Preferred Skills (Bonus):</h5>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {missingPreferred.map((s, i) => (
+                      <Tag key={i} style={{ borderRadius: 6, fontSize: 12, padding: '4px 10px', background: COLORS.bgLight }}>
+                        {s.requirement || s.canonicalName}
+                      </Tag>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </Card>
+        )}
+      </div>
+    );
+  }
+
+  /**
+   * Tab 2: Scoring Breakdown & Weights Applied
+   */
+  function renderScoringBreakdownTab(report) {
+    const breakdown = report.scoringBreakdown || {};
+    const weights = report.weightsApplied || {};
+
+    const components = [
+      { key: 'requiredSkills', name: 'Required Skills', score: breakdown.requiredSkills ?? 0, weight: weights.requiredSkills },
+      { key: 'experience', name: 'Relevant Experience', score: breakdown.experience ?? 0, weight: weights.experience },
+      { key: 'projects', name: 'Relevant Projects', score: breakdown.projects ?? 0, weight: weights.projects },
+      { key: 'education', name: 'Education Alignment', score: breakdown.education ?? 0, weight: weights.education },
+      { key: 'certifications', name: 'Certifications', score: breakdown.certifications ?? 0, weight: weights.certifications },
+    ];
+
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 20 }}>
+        {components.map((c, i) => (
+          <Card key={i} style={{ borderRadius: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+              <span style={{ fontWeight: 600, fontSize: 15, color: COLORS.textPrimary }}>{c.name}</span>
+              <Tag color="blue" style={{ borderRadius: 6, margin: 0 }}>
+                Weight: {c.weight ? `${Math.round(c.weight * 100)}%` : 'Adaptive'}
+              </Tag>
+            </div>
+            <Progress
+              percent={c.score}
+              strokeColor={c.score >= 80 ? COLORS.green : c.score >= 60 ? COLORS.primary : COLORS.amber}
+              status="active"
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 13, color: COLORS.textSecondary }}>
+              <span>Component Score</span>
+              <strong>{c.score} / 100</strong>
+            </div>
+          </Card>
+        ))}
+      </div>
+    );
+  }
+
+  /**
+   * Tab 3: Actionable Suggestions
+   */
+  function renderSuggestionsTab(report) {
+    const suggestions = report.improvementSuggestions || [];
+    const missingQualifications = report.importantMissingQualifications || [];
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {missingQualifications.length > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            message="Important Missing Qualifications"
+            description={
+              <ul style={{ margin: '6px 0 0 0', paddingLeft: 20 }}>
+                {missingQualifications.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            }
+            style={{ borderRadius: 12 }}
+          />
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {suggestions.map((sug, i) => {
+            const isObj = typeof sug === 'object' && sug !== null;
+            const title = isObj ? sug.title : `Recommendation #${i + 1}`;
+            const desc = isObj ? sug.description : sug;
+            const priority = isObj ? sug.priority : 'Medium';
+
+            return (
+              <Card
+                key={i}
+                style={{
+                  borderRadius: 14,
+                  borderLeft: `4px solid ${priority === 'High' ? COLORS.red : priority === 'Medium' ? COLORS.amber : COLORS.primary}`,
+                }}
+                styles={{ body: { padding: 18 } }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <BulbOutlined style={{ color: COLORS.amber, fontSize: 16 }} />
+                    <span style={{ fontWeight: 700, fontSize: 15, color: COLORS.textPrimary }}>{title}</span>
+                  </div>
+                  <Tag color={priority === 'High' ? 'red' : priority === 'Medium' ? 'orange' : 'green'} style={{ borderRadius: 6 }}>
+                    {priority} Priority
+                  </Tag>
+                </div>
+                <p style={{ margin: 0, fontSize: 14, color: COLORS.textSecondary, lineHeight: 1.5 }}>
+                  {desc}
+                </p>
+              </Card>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  /**
+   * Tab 4: Legacy 15 Categories (Retained for 100% backward compatibility)
+   */
+  function renderLegacyCategoriesTab(report) {
+    const categories = report.categories || [];
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
+        {categories.map((cat, idx) => (
+          <div key={idx} style={{ padding: 16, borderRadius: 12, background: COLORS.bgLight, border: `1px solid ${COLORS.borderLight}` }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+              <span style={{ fontWeight: 600, color: COLORS.textPrimary, fontSize: 14 }}>{cat.name}</span>
+              <span style={{ fontWeight: 700, color: COLORS.primaryDark || COLORS.primary, fontSize: 14 }}>
+                {cat.score} / 10 ({cat.percentage}%)
+              </span>
+            </div>
+            <Progress
+              percent={cat.percentage}
+              showInfo={false}
+              strokeColor={cat.percentage >= 80 ? COLORS.green : cat.percentage >= 65 ? COLORS.primary : COLORS.amber}
+              style={{ marginBottom: 8 }}
+            />
+            <p style={{ margin: 0, fontSize: 12, color: COLORS.textSecondary, lineHeight: 1.4 }}>{cat.explanation}</p>
+          </div>
+        ))}
+      </div>
+    );
+  }
 };
 
 export default ATSChecker;

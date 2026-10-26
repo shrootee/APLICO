@@ -4,18 +4,7 @@
  * Extracts strictly factual structured role information without hallucinating outside skills.
  */
 
-const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL_NAME = 'google/gemini-2.5-flash';
-
-/**
- * Extracts structured application details from raw job description text using Gemini 2.5 Flash.
- * @param {string} rawJd - The raw job description text pasted by the user.
- * @param {boolean} alreadyApplied - User selection (Yes / No) on whether they have already applied.
- * @returns {Promise<object>} Extracted structured data for the editable review form.
- */
 export async function extractDataFromJdWithGemini(rawJd, alreadyApplied = false) {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-
   const systemPrompt = `You are an extremely strict, factual Job Description information extractor. Your task is to extract structured fields from the provided Job Description (JD).
 
 STRICT EXTRACTION RULES:
@@ -71,54 +60,14 @@ Extract structured fields according to strict rules. Return JSON only.`;
   });
 
   let geminiExtractedJson = null;
-
-  if (apiKey && !apiKey.includes('YOUR_KEY')) {
-    try {
-      const response = await fetch(OPENROUTER_API_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5173',
-          'X-Title': 'Aplico AI JD Extractor',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: MODEL_NAME,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          response_format: { type: 'json_object' },
-          temperature: 0.1,
-          max_tokens: 2500,
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const rawContentStr = data.choices?.[0]?.message?.content || '';
-
-        // ----------------------------------------------------------------------
-        // DEBUG LOG 3: Raw Gemini response
-        // ----------------------------------------------------------------------
-        console.log('[DEBUG 3] Raw Gemini response:\n', rawContentStr);
-
-        const cleanJsonStr = rawContentStr.replace(/```json\n?|\n?```/g, '').trim();
-        geminiExtractedJson = JSON.parse(cleanJsonStr);
-
-        // ----------------------------------------------------------------------
-        // DEBUG LOG 4: Final parsed JSON
-        // ----------------------------------------------------------------------
-        console.log('[DEBUG 4] Final parsed JSON:\n', geminiExtractedJson);
-      } else {
-        const errText = await response.text();
-        console.warn(`[OpenRouter AI] Gemini 2.5 Flash returned status ${response.status}:`, errText);
-      }
-    } catch (err) {
-      console.error('[OpenRouter AI] Error querying Gemini 2.5 Flash:', err);
+  try {
+    const { callServerAi } = await import('./ats/atsApiClient.js');
+    geminiExtractedJson = await callServerAi(systemPrompt, userPrompt);
+    if (geminiExtractedJson) {
+      console.log('[DEBUG 4] Final parsed JSON from Server AI:\n', geminiExtractedJson);
     }
-  } else {
-    console.warn('[OpenRouter AI] No valid VITE_OPENROUTER_API_KEY found. Falling back to local regex parser.');
+  } catch (err) {
+    console.warn('[OpenRouter AI] Server endpoint call failed, falling back to local regex parser:', err);
   }
 
   // If Gemini extraction succeeded, validate & format Gemini results (NO LOCAL MERGING)
@@ -213,7 +162,7 @@ function extractDataFactualLocal(rawJd, alreadyApplied) {
 
   // Extract Salary
   let salary = '';
-  const salMatch = fullText.match(/(?:salary|comp|compensation|pay|stipend)[:\s]*([^\n\r.]+)|(?:[₹\$][\d,]+(?:\s*-\s*[₹\$]?[\d,]+)?(?:\s*[a-zA-Z\/]+)?)/i);
+  const salMatch = fullText.match(/(?:salary|comp|compensation|pay|stipend)[:\s]*([^\n\r.]+)|(?:[₹$][\d,]+(?:\s*-\s*[₹$]?[\d,]+)?(?:\s*[a-zA-Z/]+)?)/i);
   if (salMatch) salary = salMatch[0].trim();
 
   // Extract Experience
